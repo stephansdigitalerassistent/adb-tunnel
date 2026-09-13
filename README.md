@@ -18,7 +18,30 @@ The phone logs in as `adbtunnel`, an account that can only listen on its own loo
 restrict,port-forwarding,permitlisten="127.0.0.1:5555" ecdsa-sha2-nistp256 AAAA… adbtunnel-SM-S916B
 ```
 
-The listen address must be given as `127.0.0.1`; `localhost` or no address is refused.
+The listen address must be given as `127.0.0.1`; `localhost` or no address is refused. The same
+block has `ClientAliveInterval 20` / `ClientAliveCountMax 3`, so a session lost with a network change
+frees the port within a minute and the phone's new session can take it.
+
+## Without Wi-Fi
+
+The SSH tunnel runs over any network, but Android's *Wireless debugging* only runs on Wi-Fi.
+adbd's older TCP mode (`adb tcpip 5555`) does not care about the network, and the app tries port
+5555 first — but a reboot switches TCP mode off, and a user build does not let it be made
+permanent (`persist.adb.tcp.port` is refused). There is no way to fake Wi-Fi without root.
+
+So `server/adb-tcpip-rearm.sh` runs every minute (a systemd timer, installed as
+`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555 or 5556 and the phone behind it
+is not in TCP mode, it runs `adb tcpip 5555`. The app sees adbd move and re-points its forward.
+
+In practice: after a reboot the phone has to be on some Wi-Fi once — any network, a hotspot
+without internet will do — until the notification says *Up … phone :5555*. From then until the
+next reboot, mobile data is enough; moving between networks reconnects within about a minute.
+
+```
+sudo install -m 755 server/adb-tcpip-rearm.sh /usr/local/bin/adb-tcpip-rearm
+sudo install -m 644 server/adb-tcpip-rearm.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now adb-tcpip-rearm.timer
+```
 
 ## Setting up a phone
 

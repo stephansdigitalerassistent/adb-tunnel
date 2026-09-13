@@ -8,6 +8,9 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -17,14 +20,20 @@ import android.util.Log
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import java.io.ByteArrayInputStream
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * Holds the reverse tunnel: server 127.0.0.1:<remotePort> → this phone's adbd.
  *
- * Runs only because somebody pressed the icon, and only until Stop. There is no boot receiver and
- * no network callback, and START_NOT_STICKY means Android does not bring it back after killing it.
- * While it runs it does keep itself up: a dropped connection is retried, and when Wireless
- * debugging comes back on a different port the forward is moved to it.
+ * Runs only because somebody pressed the icon, and only until Stop. There is no boot receiver, and
+ * START_NOT_STICKY means Android does not bring it back after killing it. While it runs it does
+ * keep itself up: a dropped connection is retried, a move between Wi-Fi and mobile data reconnects
+ * at once, and when adbd comes back on a different port the forward is moved to it.
+ *
+ * The tunnel itself needs no Wi-Fi. adbd does, unless it is in TCP mode (`adb tcpip 5555`), which
+ * the server switches on through the first tunnel after each reboot — see server/ in this repo.
  */
 class TunnelService : Service() {
 
@@ -32,6 +41,9 @@ class TunnelService : Service() {
     @Volatile private var session: Session? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private val napLock = ReentrantLock()
+    private val networkChanged = napLock.newCondition()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -44,6 +56,7 @@ class TunnelService : Service() {
         if (worker?.isAlive != true) {
             running = true
             acquireLocks()
+            watchNetwork()
             worker = Thread({ keepTunnelUp() }, "adb-tunnel").also { it.start() }
         }
         return START_NOT_STICKY
@@ -52,6 +65,8 @@ class TunnelService : Service() {
     override fun onDestroy() {
         running = false
         status = "Stopped"
+        networkCallback?.let { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
+        networkCallback = null
         worker?.interrupt()
         worker = null
         // Disconnecting writes to the socket, which the main thread may not do.
@@ -69,8 +84,7 @@ class TunnelService : Service() {
                 switchOnWirelessDebugging()
                 val port = AdbPort.find()
                 if (port == null) {
-                    update("Waiting for Wireless debugging (needs Wi-Fi)")
-                    Thread.sleep(5_000)
+                    waitForAdb()
                     continue
                 }
                 update("Connecting to the server…")
@@ -78,7 +92,7 @@ class TunnelService : Service() {
                     connect()
                 } catch (e: Exception) {
                     update("Server not reachable, retrying: ${e.message}")
-                    Thread.sleep(10_000)
+                    nap(10_000)
                     continue
                 }
                 session = connected
@@ -87,12 +101,12 @@ class TunnelService : Service() {
                     var current: Int = port
                     update(upText(remotePort, current))
                     while (connected.isConnected) {
-                        Thread.sleep(15_000)
-                        if (AdbPort.isAdb(current)) continue
+                        nap(15_000)
+                        if (!connected.isConnected || AdbPort.isAdb(current)) continue
                         switchOnWirelessDebugging()
                         val next = AdbPort.find()
                         if (next == null) {
-                            update("Wireless debugging is off, waiting")
+                            update(adbMissingText())
                             continue
                         }
                         if (next != current) {
@@ -106,13 +120,14 @@ class TunnelService : Service() {
                 } catch (e: InterruptedException) {
                     throw e
                 } catch (e: Exception) {
-                    // Most often "remote port forwarding failed": another tunnel still holds the port.
+                    // Most often "remote port forwarding failed": the server still holds the port
+                    // for a session lost on the previous network, until its keep-alive gives up.
                     update("Retrying in 10 s: ${e.message}")
                 } finally {
                     connected.disconnect()
                     session = null
                 }
-                Thread.sleep(10_000)
+                nap(10_000)
             }
         } catch (e: InterruptedException) {
             // Stop was pressed.
@@ -120,6 +135,16 @@ class TunnelService : Service() {
     }
 
     private fun upText(remotePort: Int, phonePort: Int) = "Up: server :$remotePort → phone :$phonePort"
+
+    /** Probing every loopback port is not free, so without Wi-Fi it is retried only now and then. */
+    private fun waitForAdb() {
+        update(adbMissingText())
+        nap(if (onWifi()) 5_000 else 30_000)
+    }
+
+    private fun adbMissingText() =
+        if (onWifi()) "Waiting for Wireless debugging"
+        else "adb is off since the phone restarted: join any Wi-Fi once"
 
     private fun connect(): Session {
         val jsch = JSch()
@@ -142,8 +167,46 @@ class TunnelService : Service() {
         return s
     }
 
-    /** Needs WRITE_SECURE_SETTINGS (granted over adb). Without it, Wireless debugging is switched on by hand. */
+    /**
+     * A move between Wi-Fi and mobile data leaves the SSH socket dead without an error, and the
+     * keep-alives would only notice after 90 s. So on a new default network the session is dropped
+     * straight away and the loop woken to build a new one.
+     */
+    private fun watchNetwork() {
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            private var current: Network? = null
+
+            override fun onAvailable(network: Network) {
+                val previous = current
+                current = network
+                if (previous != null && previous != network) {
+                    Log.i(TAG, "default network changed, reconnecting")
+                    session?.let { Thread { it.disconnect() }.start() }
+                }
+                napLock.withLock { networkChanged.signalAll() }
+            }
+        }
+        getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(callback)
+        networkCallback = callback
+    }
+
+    /** Sleeps up to [ms], or less when the network changes. Stop still ends it by interrupting. */
+    private fun nap(ms: Long) {
+        napLock.withLock { networkChanged.await(ms, TimeUnit.MILLISECONDS) }
+    }
+
+    @Suppress("DEPRECATION") // allNetworks: a Wi-Fi without internet is not the default network, but counts here.
+    private fun onWifi(): Boolean {
+        val cm = getSystemService(ConnectivityManager::class.java)
+        return cm.allNetworks.any { cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true }
+    }
+
+    /**
+     * Needs WRITE_SECURE_SETTINGS (granted over adb). Without it, Wireless debugging is switched on
+     * by hand. Off Wi-Fi Android turns the setting straight back off, so it is not even tried.
+     */
     private fun switchOnWirelessDebugging() {
+        if (!onWifi()) return
         try {
             if (Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) != 1) {
                 Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)

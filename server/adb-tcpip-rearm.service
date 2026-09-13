@@ -1,0 +1,9 @@
+[Unit]
+Description=Put adbd into TCP mode on phones behind the adb tunnel
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/usr/local/bin/adb-tcpip-rearm
+# The adb server this may start has to outlive the run.
+KillMode=process
