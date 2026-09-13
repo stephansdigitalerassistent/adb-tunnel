@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A prompt, ">_": this icon opens a way in for a terminal elsewhere. -->
+<!-- A tunnel mouth with traffic both ways, the same mark as the notification. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -7,15 +7,16 @@
     android:viewportHeight="108">
     <path
         android:fillColor="#00000000"
-        android:pathData="M38,40 L54,54 L38,68"
+        android:pathData="M30,76 V54 A24,24 0 0 1 78,54 V76"
         android:strokeColor="#FFFFFFFF"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
         android:strokeWidth="6" />
     <path
         android:fillColor="#00000000"
-        android:pathData="M60,68 L72,68"
+        android:pathData="M41,65 H67 M60,58 L67,65 L60,72 M48,58 L41,65 L48,72"
         android:strokeColor="#FFFFFFFF"
         android:strokeLineCap="round"
-        android:strokeWidth="6" />
+        android:strokeLineJoin="round"
+        android:strokeWidth="5" />
 </vector>
