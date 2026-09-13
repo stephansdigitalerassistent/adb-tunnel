@@ -33,6 +33,12 @@ So `server/adb-tcpip-rearm.sh` runs every minute (a systemd timer, installed as
 `/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555 or 5556 and the phone behind it
 is not in TCP mode, it runs `adb tcpip 5555`. The app sees adbd move and re-points its forward.
 
+**USB debugging must be on as well**, cable or not. When the Wi-Fi goes, Android turns Wireless
+debugging off, and if USB debugging is also off it stops adbd altogether — TCP mode included, even
+though `service.adb.tcp.port` still reads 5555. The app switches USB debugging on while it runs
+(`adb_enabled`, same WRITE_SECURE_SETTINGS grant) and moves its forward to 5555 as soon as TCP mode
+answers; the server script checks whether 5555 answers rather than trusting that property.
+
 In practice: after a reboot the phone has to be on some Wi-Fi once — any network, a hotspot
 without internet will do — until the notification says *Up … phone :5555*. From then until the
 next reboot, mobile data is enough; moving between networks reconnects within about a minute.
