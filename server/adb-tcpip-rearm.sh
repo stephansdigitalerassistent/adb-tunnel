@@ -9,7 +9,10 @@ set -u
 
 for port in 5555 5556; do
     serial=127.0.0.1:$port
-    ss -Hltn "sport = :$port" | grep -q '127\.0\.0\.1:' || continue
+    # Only tunnels the app holds: it follows adbd to its new port, while a hand-made tunnel to a
+    # Wireless debugging port (Termux, pairing) would be cut off by the restart.
+    pid=$(sudo -n ss -Hltnp "sport = :$port" | grep '127\.0\.0\.1:' | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
+    [ -n "$pid" ] && [ "$(ps -o user= -p "$pid")" = adbtunnel ] || continue
     [ "$(adb -s "$serial" get-state 2>/dev/null)" = device ] ||
         timeout 15 adb connect "$serial" >/dev/null 2>&1
     [ "$(adb -s "$serial" get-state 2>/dev/null)" = device ] || continue
