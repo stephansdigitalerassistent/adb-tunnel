@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status icon whenever the tunnel is not up: waiting, connecting, retrying. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/tunnel_down" />
+    <foreground android:drawable="@drawable/ic_tunnel_down_foreground" />
+</adaptive-icon>

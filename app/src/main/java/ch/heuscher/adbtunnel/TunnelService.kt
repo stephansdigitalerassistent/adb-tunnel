@@ -66,6 +66,7 @@ class TunnelService : Service() {
     override fun onDestroy() {
         running = false
         status = "Stopped"
+        up = false
         networkCallback?.let { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
         networkCallback = null
         worker?.interrupt()
@@ -100,7 +101,7 @@ class TunnelService : Service() {
                 try {
                     connected.setPortForwardingR(AdbPort.LOOPBACK, remotePort, AdbPort.LOOPBACK, port)
                     var current: Int = port
-                    update(upText(remotePort, current))
+                    update(upText(remotePort, current), isUp = true)
                     while (connected.isConnected) {
                         nap(15_000)
                         if (!connected.isConnected) continue
@@ -123,7 +124,7 @@ class TunnelService : Service() {
                             connected.setPortForwardingR(AdbPort.LOOPBACK, remotePort, AdbPort.LOOPBACK, next)
                             current = next
                         }
-                        update(upText(remotePort, current))
+                        update(upText(remotePort, current), isUp = true)
                     }
                     update("Connection lost, reconnecting")
                 } catch (e: InterruptedException) {
@@ -232,18 +233,20 @@ class TunnelService : Service() {
         }
     }
 
-    private fun update(text: String) {
-        if (text == status) return
+    /** Anything but an "Up" line counts as down: waiting, connecting, retrying. */
+    private fun update(text: String, isUp: Boolean = false) {
+        if (text == status && isUp == up) return
         status = text
+        up = isUp
         Log.i(TAG, text)
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text))
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
     }
 
     private fun goForeground() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "adb tunnel", NotificationManager.IMPORTANCE_LOW)
         )
-        val notification = notification(status)
+        val notification = notification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
@@ -251,14 +254,16 @@ class TunnelService : Service() {
         }
     }
 
-    private fun notification(text: String): Notification {
+    private fun notification(): Notification {
         val stop = PendingIntent.getService(
             this, 0, Intent(this, TunnelService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE
         )
         return Notification.Builder(this, CHANNEL)
-            .setSmallIcon(R.drawable.ic_stat_tunnel)
+            // Full-colour icons rather than the usual white mask: One UI shows them in colour in the
+            // status bar — green with arrows while up, red with a cross otherwise.
+            .setSmallIcon(if (up) R.mipmap.ic_tunnel_up else R.mipmap.ic_tunnel_down)
             .setContentTitle("adb tunnel")
-            .setContentText(text)
+            .setContentText(status)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .addAction(
@@ -287,6 +292,7 @@ class TunnelService : Service() {
     companion object {
         @Volatile var running = false
         @Volatile var status = "Starting…"
+        @Volatile var up = false
 
         private const val ACTION_STOP = "ch.heuscher.adbtunnel.STOP"
         private const val CHANNEL = "tunnel"

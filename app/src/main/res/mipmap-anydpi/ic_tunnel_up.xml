@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status icon while the tunnel is up. Full colour on purpose: One UI shows such small icons in
+     colour in the status bar, the way gentle-connection's launcher icon appears there. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/tunnel_up" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

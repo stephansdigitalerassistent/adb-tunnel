@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="tunnel_up">#FF2E7D32</color>
+    <color name="tunnel_down">#FFC62828</color>
+</resources>
