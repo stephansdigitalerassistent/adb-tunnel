@@ -33,7 +33,8 @@ import kotlin.concurrent.withLock
  * at once, and when adbd comes back on a different port the forward is moved to it.
  *
  * The tunnel itself needs no Wi-Fi. adbd does, unless it is in TCP mode (`adb tcpip 5555`), which
- * the server switches on through the first tunnel after each reboot — see server/ in this repo.
+ * the server switches on through the first tunnel after each reboot — see server/ in this repo —
+ * and unless USB debugging is on: with USB and Wireless debugging both off, Android stops adbd.
  */
 class TunnelService : Service() {
 
@@ -81,7 +82,7 @@ class TunnelService : Service() {
             .getInt(Config.KEY_REMOTE_PORT, Config.DEFAULT_REMOTE_PORT)
         try {
             while (!Thread.currentThread().isInterrupted) {
-                switchOnWirelessDebugging()
+                keepAdbdOn()
                 val port = AdbPort.find()
                 if (port == null) {
                     waitForAdb()
@@ -102,9 +103,17 @@ class TunnelService : Service() {
                     update(upText(remotePort, current))
                     while (connected.isConnected) {
                         nap(15_000)
-                        if (!connected.isConnected || AdbPort.isAdb(current)) continue
-                        switchOnWirelessDebugging()
-                        val next = AdbPort.find()
+                        if (!connected.isConnected) continue
+                        // A Wireless debugging port dies with the Wi-Fi, TCP mode does not: move to
+                        // it as soon as it is there, even while the current port still answers.
+                        val next = when {
+                            current != TCP_MODE_PORT && AdbPort.isAdb(TCP_MODE_PORT) -> TCP_MODE_PORT
+                            AdbPort.isAdb(current) -> continue
+                            else -> {
+                                keepAdbdOn()
+                                AdbPort.find()
+                            }
+                        }
                         if (next == null) {
                             update(adbMissingText())
                             continue
@@ -202,18 +211,24 @@ class TunnelService : Service() {
     }
 
     /**
-     * Needs WRITE_SECURE_SETTINGS (granted over adb). Without it, Wireless debugging is switched on
-     * by hand. Off Wi-Fi Android turns the setting straight back off, so it is not even tried.
+     * Needs WRITE_SECURE_SETTINGS (granted over adb); without it both switches are set by hand.
+     *
+     * USB debugging stays on so that adbd is not stopped when the Wi-Fi goes: Android stops it once
+     * USB and Wireless debugging are both off, and TCP mode dies with it. Wireless debugging is only
+     * switched on while on Wi-Fi, because off Wi-Fi Android turns it straight back off.
      */
-    private fun switchOnWirelessDebugging() {
-        if (!onWifi()) return
+    private fun keepAdbdOn() {
         try {
-            if (Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) != 1) {
+            if (Settings.Global.getInt(contentResolver, Settings.Global.ADB_ENABLED, 0) != 1) {
+                Settings.Global.putInt(contentResolver, Settings.Global.ADB_ENABLED, 1)
+                Log.i(TAG, "switched USB debugging on")
+            }
+            if (onWifi() && Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) != 1) {
                 Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
                 Log.i(TAG, "switched Wireless debugging on")
             }
         } catch (e: SecurityException) {
-            Log.w(TAG, "cannot switch Wireless debugging on: WRITE_SECURE_SETTINGS not granted")
+            Log.w(TAG, "cannot switch debugging on: WRITE_SECURE_SETTINGS not granted")
         }
     }
 
@@ -277,5 +292,7 @@ class TunnelService : Service() {
         private const val CHANNEL = "tunnel"
         private const val NOTIFICATION_ID = 1
         private const val ADB_WIFI_ENABLED = "adb_wifi_enabled"
+        /** The port the server's `adb tcpip` puts adbd on. */
+        private const val TCP_MODE_PORT = 5555
     }
 }
