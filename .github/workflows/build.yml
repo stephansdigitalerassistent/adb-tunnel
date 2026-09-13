@@ -1,0 +1,60 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The version code is the commit count; a shallow clone would always say 2.
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Refuses to build without the key rather than falling back to a throwaway one: an APK
+      # signed differently cannot be installed over the app, and uninstalling it deletes the
+      # phone's SSH key.
+      - name: Provide the signing key
+        env:
+          SIGNING_KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+        run: |
+          test -n "$SIGNING_KEYSTORE_B64" || { echo "::error::SIGNING_KEYSTORE_B64 is not set"; exit 1; }
+          printf '%s' "$SIGNING_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/signing.jks"
+
+      - name: Build
+        env:
+          SIGNING_STORE_FILE: ${{ runner.temp }}/signing.jks
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace
+
+      # A release asset rather than a build artifact: artifact storage is shared with the other
+      # repositories on this account and fills up. Delete-then-create so the tag follows the commit.
+      - name: Publish the APK
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          test -n "$APK" || { echo "::error::no APK was produced"; exit 1; }
+          cp "$APK" "$RUNNER_TEMP/adb-tunnel.apk"
+          gh release delete ci-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create ci-latest "$RUNNER_TEMP/adb-tunnel.apk" --prerelease \
+            --title "Latest CI build" \
+            --notes "Built from ${{ github.sha }} on $(date -u +'%Y-%m-%d %H:%M UTC')."
