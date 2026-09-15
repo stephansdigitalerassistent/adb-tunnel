@@ -27,6 +27,9 @@ object Keys {
         return File(context.filesDir, PUBLIC).readText().trim()
     }
 
+    /** Whether a key was ever made, without making one. */
+    fun exists(context: Context): Boolean = File(context.filesDir, PRIVATE).exists()
+
     @Synchronized
     private fun ensure(context: Context) {
         val privateFile = File(context.filesDir, PRIVATE)

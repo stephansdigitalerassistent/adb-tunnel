@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
@@ -27,9 +28,10 @@ import kotlin.concurrent.withLock
 /**
  * Holds the reverse tunnel: server 127.0.0.1:<remotePort> → this phone's adbd.
  *
- * Runs only because somebody pressed the icon, and only until Stop. There is no boot receiver, and
- * START_NOT_STICKY means Android does not bring it back after killing it. While it runs it does
- * keep itself up: a dropped connection is retried, a move between Wi-Fi and mobile data reconnects
+ * Runs from pressing the icon until pressing Stop, and in between it keeps coming back: START_STICKY
+ * has Android restart it after killing it or after a crash, and [RestartReceiver] starts it again
+ * after a phone restart or an app update. Only Stop ends that ([wanted]). While it runs it keeps
+ * the tunnel up: a dropped connection is retried, a move between Wi-Fi and mobile data reconnects
  * at once, and when adbd comes back on a different port the forward is moved to it.
  *
  * The tunnel itself needs no Wi-Fi. adbd does, unless it is in TCP mode (`adb tcpip 5555`), which
@@ -50,17 +52,32 @@ class TunnelService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            setWanted(this, false)
             stopSelf()
             return START_NOT_STICKY
         }
-        goForeground()
+        // No intent: Android restarting it after killing the process. Stop wins over that.
+        if (intent == null && !wanted(this)) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        try {
+            goForeground()
+        } catch (e: IllegalStateException) {
+            // ForegroundServiceStartNotAllowedException: a restart Android allowed to run but not
+            // in the foreground. Stay wanted, so the next restart, update or icon press retries.
+            Log.w(TAG, "not allowed into the foreground, waiting for the next start: ${e.message}")
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (worker?.isAlive != true) {
             running = true
             acquireLocks()
             watchNetwork()
             worker = Thread({ keepTunnelUp() }, "adb-tunnel").also { it.start() }
         }
-        return START_NOT_STICKY
+        if (intent == null) Log.i(TAG, "restarted by Android")
+        return START_STICKY
     }
 
     override fun onDestroy() {
@@ -293,6 +310,25 @@ class TunnelService : Service() {
         @Volatile var running = false
         @Volatile var status = "Starting…"
         @Volatile var up = false
+
+        /**
+         * Whether the tunnel should be running: set by pressing the icon, cleared only by Stop.
+         *
+         * Versions before this did not record it. For them, a phone whose icon was ever pressed —
+         * it has a login key, made on the first press — counts as wanted, so the update that
+         * brings this in also brings the running tunnel back.
+         */
+        fun wanted(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(Config.PREFS, Context.MODE_PRIVATE)
+            return if (prefs.contains(Config.KEY_WANTED)) prefs.getBoolean(Config.KEY_WANTED, false)
+            else Keys.exists(context)
+        }
+
+        fun setWanted(context: Context, wanted: Boolean) {
+            // commit, not apply: after Stop the process may be gone before an apply is written.
+            context.getSharedPreferences(Config.PREFS, Context.MODE_PRIVATE).edit()
+                .putBoolean(Config.KEY_WANTED, wanted).commit()
+        }
 
         private const val ACTION_STOP = "ch.heuscher.adbtunnel.STOP"
         private const val CHANNEL = "tunnel"

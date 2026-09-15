@@ -20,5 +20,7 @@ object Config {
 
     const val PREFS = "tunnel"
     const val KEY_REMOTE_PORT = "remotePort"
+    /** True from pressing the icon until pressing Stop. See TunnelService.wanted. */
+    const val KEY_WANTED = "wanted"
     const val EXTRA_REMOTE_PORT = "remotePort"
 }

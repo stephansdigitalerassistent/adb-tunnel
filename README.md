@@ -4,8 +4,12 @@ One icon that exposes this phone's wireless adb to the assistant server, and not
 
 Pressing it switches Wireless debugging on, finds adbd's current port, and holds a reverse SSH
 tunnel — server `127.0.0.1:5555` → phone adbd — in a foreground service with a Stop button.
-Pressing it again only reports the status. Nothing starts it on boot or on Wi-Fi, and Android does
-not restart it after killing it.
+Pressing it again only reports the status.
+
+Once started it stays on until Stop is pressed: it comes back by itself after the phone restarts
+(once unlocked), after an app update, and after Android kills it or it crashes. After Stop it stays
+off — through restarts too — until the icon is pressed again. After a restart adbd still needs Wi-Fi
+once (see below); the tunnel waits for it and says so.
 
 ## The server side
 

@@ -45,6 +45,8 @@ class TunnelActivity : Activity() {
     private fun startTunnel() {
         val message = if (TunnelService.running) "adb tunnel: ${TunnelService.status}" else "adb tunnel starting"
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        // From now on it comes back after restarts and updates, until Stop.
+        TunnelService.setWanted(this, true)
         startForegroundService(Intent(this, TunnelService::class.java))
         finish()
     }
