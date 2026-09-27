@@ -276,9 +276,11 @@ class TunnelService : Service() {
         Thread({
             try {
                 Thread.sleep(5_000)
-                if (!onWifi()) return@Thread
+                // Roamed meanwhile (router ↔ extender): the reading says nothing about [bssid].
+                if (currentBssid() != bssid) return@Thread
                 if (Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1) {
                     allowedWifi.add(bssid)
+                    Log.i(TAG, "learned allowed Wi-Fi: $bssid")
                 } else {
                     allowedWifi.remove(bssid)
                     Log.i(TAG, "Wireless debugging flipped back to 0 on $bssid; not allowed")
@@ -291,7 +293,7 @@ class TunnelService : Service() {
         }, "verify-wifi").start()
     }
 
-    private fun verifyFallback(network: Network) {
+    private fun verifyFallback() {
         Thread({
             try {
                 Thread.sleep(5_000)
@@ -331,11 +333,13 @@ class TunnelService : Service() {
             val wifiEnabled = Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1
 
             if (bssid != null) {
-                if (wifiEnabled) {
-                    allowedWifi.add(bssid)
+                if (verifyingBssid == bssid) {
+                    // A 5 s check is running; it decides.
+                } else if (wifiEnabled) {
+                    // On right after roaming can still be the previous access point's "on", so it is
+                    // only learned once it stays on here for 5 s.
+                    if (!allowedWifi.contains(bssid)) verifyWifi(bssid)
                     logWifiDecision("allowed:$bssid:on")
-                } else if (verifyingBssid == bssid) {
-                    // Verification in progress, wait for 5 s check
                 } else if (allowedWifi.contains(bssid)) {
                     Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
                     logWifiDecision("allowed:$bssid:switched_on", "switched Wireless debugging on for allowed Wi-Fi $bssid")
@@ -352,7 +356,7 @@ class TunnelService : Service() {
                     fallbackAttemptedNetwork = wifiNetwork
                     Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
                     logWifiDecision("fallback_try:$wifiNetwork", "BSSID unknown; trying Wireless debugging once for network $wifiNetwork")
-                    verifyFallback(wifiNetwork)
+                    verifyFallback()
                 } else {
                     logWifiDecision("fallback_skip:$wifiNetwork", "BSSID unknown and Wireless debugging was reset to 0; leaving off on network $wifiNetwork")
                 }
@@ -392,11 +396,11 @@ class TunnelService : Service() {
             for (i in 1..12) {
                 Thread.sleep(5_000)
                 if (!onWifi()) break
+                if (currentBssid() != startBssid) break // roamed: the answer was for another access point
                 if (Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1) {
-                    val bssid = currentBssid() ?: startBssid
-                    if (bssid != null) {
-                        allowedWifi.add(bssid)
-                        Log.i(TAG, "learned allowed Wi-Fi: $bssid")
+                    if (startBssid != null) {
+                        allowedWifi.add(startBssid)
+                        Log.i(TAG, "learned allowed Wi-Fi: $startBssid")
                     }
                     break
                 }
