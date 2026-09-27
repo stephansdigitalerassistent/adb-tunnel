@@ -12,6 +12,7 @@ import android.graphics.drawable.Icon
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -47,6 +48,10 @@ class TunnelService : Service() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val napLock = ReentrantLock()
     private val networkChanged = napLock.newCondition()
+    private val allowedWifi by lazy { AllowedWifi(this) }
+    private var fallbackAttemptedNetwork: Network? = null
+    private var lastWifiDecision: String? = null
+    @Volatile private var verifyingBssid: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -96,6 +101,9 @@ class TunnelService : Service() {
         // Disconnecting writes to the socket, which the main thread may not do.
         session?.let { Thread { it.disconnect() }.start() }
         releaseLocks()
+        fallbackAttemptedNetwork = null
+        lastWifiDecision = null
+        verifyingBssid = null
         Log.i(TAG, "stopped")
         super.onDestroy()
     }
@@ -228,17 +236,85 @@ class TunnelService : Service() {
     }
 
     @Suppress("DEPRECATION") // allNetworks: a Wi-Fi without internet is not the default network, but counts here.
-    private fun onWifi(): Boolean {
-        val cm = getSystemService(ConnectivityManager::class.java)
-        return cm.allNetworks.any { cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true }
+    private fun currentWifiNetwork(): Network? {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return null
+        return cm.allNetworks.firstOrNull {
+            cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        }
+    }
+
+    private fun onWifi(): Boolean = currentWifiNetwork() != null
+
+    private fun currentBssid(): String? {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return null
+        @Suppress("DEPRECATION")
+        for (network in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(network) ?: continue
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                val wifiInfo = caps.transportInfo as? WifiInfo
+                val bssid = AllowedWifi.clean(wifiInfo?.bssid)
+                if (bssid != null) return bssid
+            }
+        }
+        val wm = applicationContext.getSystemService(WifiManager::class.java)
+        @Suppress("DEPRECATION")
+        val bssid = try { wm?.connectionInfo?.bssid } catch (e: Exception) { null }
+        return AllowedWifi.clean(bssid)
+    }
+
+    private fun logWifiDecision(key: String, message: String? = null, warn: Boolean = false) {
+        if (key != lastWifiDecision) {
+            lastWifiDecision = key
+            if (message != null) {
+                if (warn) Log.w(TAG, message) else Log.i(TAG, message)
+            }
+        }
+    }
+
+    private fun verifyWifi(bssid: String) {
+        verifyingBssid = bssid
+        Thread({
+            try {
+                Thread.sleep(5_000)
+                if (!onWifi()) return@Thread
+                if (Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1) {
+                    allowedWifi.add(bssid)
+                } else {
+                    allowedWifi.remove(bssid)
+                    Log.i(TAG, "Wireless debugging flipped back to 0 on $bssid; not allowed")
+                }
+            } catch (e: InterruptedException) {
+                // Interrupted
+            } finally {
+                if (verifyingBssid == bssid) verifyingBssid = null
+            }
+        }, "verify-wifi").start()
+    }
+
+    private fun verifyFallback(network: Network) {
+        Thread({
+            try {
+                Thread.sleep(5_000)
+                if (!onWifi()) return@Thread
+                if (Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1) {
+                    currentBssid()?.let { allowedWifi.add(it) }
+                }
+            } catch (e: InterruptedException) {
+                // Interrupted
+            }
+        }, "verify-fallback").start()
     }
 
     /**
-     * Needs WRITE_SECURE_SETTINGS (granted over adb); without it both switches are set by hand.
+     * Needs WRITE_SECURE_SETTINGS and location permissions (granted over adb):
+     * adb shell pm grant ch.heuscher.adbtunnel android.permission.WRITE_SECURE_SETTINGS
+     * adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_FINE_LOCATION
+     * adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_BACKGROUND_LOCATION
      *
      * USB debugging stays on so that adbd is not stopped when the Wi-Fi goes: Android stops it once
      * USB and Wireless debugging are both off, and TCP mode dies with it. Wireless debugging is only
-     * switched on while on Wi-Fi, because off Wi-Fi Android turns it straight back off.
+     * switched on when the current Wi-Fi BSSID is in the allowed set, to prevent Android from asking
+     * "Debugging über WLAN in diesem Netzwerk zulassen?" on unknown networks.
      */
     private fun keepAdbdOn() {
         try {
@@ -246,12 +322,43 @@ class TunnelService : Service() {
                 Settings.Global.putInt(contentResolver, Settings.Global.ADB_ENABLED, 1)
                 Log.i(TAG, "switched USB debugging on")
             }
-            if (onWifi() && Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) != 1) {
-                Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
-                Log.i(TAG, "switched Wireless debugging on")
+            val wifiNetwork = currentWifiNetwork()
+            if (wifiNetwork == null) {
+                lastWifiDecision = "not_on_wifi"
+                return
+            }
+            val bssid = currentBssid()
+            val wifiEnabled = Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1
+
+            if (bssid != null) {
+                if (wifiEnabled) {
+                    allowedWifi.add(bssid)
+                    logWifiDecision("allowed:$bssid:on")
+                } else if (verifyingBssid == bssid) {
+                    // Verification in progress, wait for 5 s check
+                } else if (allowedWifi.contains(bssid)) {
+                    Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
+                    logWifiDecision("allowed:$bssid:switched_on", "switched Wireless debugging on for allowed Wi-Fi $bssid")
+                    verifyWifi(bssid)
+                } else {
+                    logWifiDecision("disallowed:$bssid", "Wi-Fi $bssid is not in allowed set, leaving Wireless debugging off")
+                }
+            } else {
+                // Fallback when BSSID cannot be read: try once per Wi-Fi connection
+                if (wifiEnabled) {
+                    fallbackAttemptedNetwork = wifiNetwork
+                    logWifiDecision("fallback_on:$wifiNetwork")
+                } else if (fallbackAttemptedNetwork != wifiNetwork) {
+                    fallbackAttemptedNetwork = wifiNetwork
+                    Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
+                    logWifiDecision("fallback_try:$wifiNetwork", "BSSID unknown; trying Wireless debugging once for network $wifiNetwork")
+                    verifyFallback(wifiNetwork)
+                } else {
+                    logWifiDecision("fallback_skip:$wifiNetwork", "BSSID unknown and Wireless debugging was reset to 0; leaving off on network $wifiNetwork")
+                }
             }
         } catch (e: SecurityException) {
-            Log.w(TAG, "cannot switch debugging on: WRITE_SECURE_SETTINGS not granted")
+            logWifiDecision("security_exception", "cannot switch debugging on: WRITE_SECURE_SETTINGS not granted", warn = true)
         }
     }
 
@@ -261,7 +368,12 @@ class TunnelService : Service() {
      * only when Wireless debugging is switched on while on an access point not allowed yet, so it is
      * switched off and on again; on an access point already allowed that passes silently. Android
      * remembers the access point (BSSID), not the Wi-Fi name: a router with an extender needs this
-     * once near each of them.
+     * once near each of them. When allowed, the BSSID is learned and remembered.
+     *
+     * Needs WRITE_SECURE_SETTINGS and location permissions (granted over adb):
+     * adb shell pm grant ch.heuscher.adbtunnel android.permission.WRITE_SECURE_SETTINGS
+     * adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_FINE_LOCATION
+     * adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_BACKGROUND_LOCATION
      *
      * TCP mode (port 5555), which the tunnel prefers, is not touched by this.
      */
@@ -275,6 +387,20 @@ class TunnelService : Service() {
             Thread.sleep(1_000)
             Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
             Log.i(TAG, "switched Wireless debugging off and on, so Android asks for this Wi-Fi")
+            currentWifiNetwork()?.let { fallbackAttemptedNetwork = it }
+            val startBssid = currentBssid()
+            for (i in 1..12) {
+                Thread.sleep(5_000)
+                if (!onWifi()) break
+                if (Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1) {
+                    val bssid = currentBssid() ?: startBssid
+                    if (bssid != null) {
+                        allowedWifi.add(bssid)
+                        Log.i(TAG, "learned allowed Wi-Fi: $bssid")
+                    }
+                    break
+                }
+            }
         } catch (e: SecurityException) {
             update("Ask for this Wi-Fi: WRITE_SECURE_SETTINGS not granted")
         } catch (e: InterruptedException) {

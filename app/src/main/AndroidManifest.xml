@@ -15,6 +15,12 @@
     <uses-permission
         android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
+    <!-- To read the current Wi-Fi BSSID and avoid asking for Wireless debugging on unknown networks.
+         Granted once over adb:
+         adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_FINE_LOCATION
+         adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_BACKGROUND_LOCATION -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <application
         android:allowBackup="false"

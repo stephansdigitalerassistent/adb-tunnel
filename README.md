@@ -12,11 +12,12 @@ off — through restarts too — until the icon is pressed again. After a restar
 once (see below); the tunnel waits for it and says so.
 
 Android asks "Debugging über WLAN in diesem Netzwerk zulassen?" the first time Wireless debugging
-comes on at a Wi-Fi access point. The notification's *Ask for this Wi-Fi* button brings that
-question up on purpose (it switches Wireless debugging off and on), so it can be answered once —
-with *Immer in diesem Netzwerk zulassen* ticked — while someone is next to the phone, instead of
-surprising its owner later. Android remembers the access point, not the Wi-Fi name: with a
-router plus an extender, press it once near each.
+comes on at a Wi-Fi access point. The app remembers allowed access points (by BSSID) and only enables
+Wireless debugging on them, so it never causes that question by itself. The notification's *Ask for
+this Wi-Fi* button brings that question up on purpose (it switches Wireless debugging off and on), so
+it can be answered once — with *Immer in diesem Netzwerk zulassen* ticked — while someone is next to
+the phone, instead of surprising its owner later. Android remembers the access point, not the Wi-Fi
+name: with a router plus an extender, press it once near each.
 
 ## The server side
 
@@ -68,6 +69,8 @@ gh release download ci-latest -R stephansdigitalerassistent/adb-tunnel -p adb-tu
 adb install -r adb-tunnel.apk
 adb shell pm grant ch.heuscher.adbtunnel android.permission.WRITE_SECURE_SETTINGS
 adb shell pm grant ch.heuscher.adbtunnel android.permission.POST_NOTIFICATIONS
+adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_FINE_LOCATION
+adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_BACKGROUND_LOCATION
 adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity          # --ei remotePort 5556 on the Fold, 5558 on the S10+
 adb logcat -d -s AdbTunnel | grep 'public key'                        # → the server's authorized_keys
 ```

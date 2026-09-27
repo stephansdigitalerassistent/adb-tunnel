@@ -18,7 +18,7 @@ fun gitCommitCount(): Int = try {
     0
 }
 
-val appVersionCode = 1 + gitCommitCount()
+val appVersionCode = 2 + gitCommitCount()
 
 android {
     namespace = "ch.heuscher.adbtunnel"
@@ -30,7 +30,7 @@ android {
         minSdk = 30
         targetSdk = 36
         versionCode = appVersionCode
-        versionName = "1.0.$appVersionCode"
+        versionName = "1.1.$appVersionCode"
     }
 
     signingConfigs {
