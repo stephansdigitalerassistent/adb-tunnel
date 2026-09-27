@@ -15,7 +15,7 @@ once (see below); the tunnel waits for it and says so.
 
 The phone logs in as `adbtunnel`, an account that can only listen on its own loopback port:
 `/sbin/nologin` shell, and a `Match User adbtunnel` block in `/etc/ssh/sshd_config` with
-`AllowTcpForwarding remote`, `PermitListen 127.0.0.1:5555 127.0.0.1:5556`, `PermitTTY no` and
+`AllowTcpForwarding remote`, `PermitListen 127.0.0.1:5555 127.0.0.1:5556 127.0.0.1:5557`, `PermitTTY no` and
 `ForceCommand /sbin/nologin`. Each phone's key is further pinned to one port:
 
 ```
@@ -35,7 +35,7 @@ adbd's older TCP mode (`adb tcpip 5555`) does not care about the network, and th
 permanent (`persist.adb.tcp.port` is refused). There is no way to fake Wi-Fi without root.
 
 So `server/adb-tcpip-rearm.sh` runs every minute (a systemd timer, installed as
-`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555 or 5556 and the phone behind it
+`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555, 5556 or 5557 and the phone behind it
 is not in TCP mode, it runs `adb tcpip 5555`. The app sees adbd move and re-points its forward.
 
 **USB debugging must be on as well**, cable or not. When the Wi-Fi goes, Android turns Wireless
@@ -61,7 +61,7 @@ gh release download ci-latest -R stephansdigitalerassistent/adb-tunnel -p adb-tu
 adb install -r adb-tunnel.apk
 adb shell pm grant ch.heuscher.adbtunnel android.permission.WRITE_SECURE_SETTINGS
 adb shell pm grant ch.heuscher.adbtunnel android.permission.POST_NOTIFICATIONS
-adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity          # add --ei remotePort 5556 on the Fold
+adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity          # --ei remotePort 5556 on the Fold, 5557 on the S10+
 adb logcat -d -s AdbTunnel | grep 'public key'                        # → the server's authorized_keys
 ```
 

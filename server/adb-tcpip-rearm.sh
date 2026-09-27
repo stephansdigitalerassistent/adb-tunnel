@@ -7,7 +7,7 @@
 # phone needs no Wi-Fi. The app sees adbd move to 5555 and re-points its forward by itself.
 set -u
 
-for port in 5555 5556; do
+for port in 5555 5556 5557; do
     serial=127.0.0.1:$port
     # Only tunnels the app holds: it follows adbd to its new port, while a hand-made tunnel to a
     # Wireless debugging port (Termux, pairing) would be cut off by the restart.
@@ -19,7 +19,9 @@ for port in 5555 5556; do
     # Ask the port, not service.adb.tcp.port: that property stays 5555 after adbd has been stopped
     # and started again without its TCP listener. Only a clean answer counts: a failed query must
     # not restart adbd under someone's test run.
-    out=$(timeout 15 adb -s "$serial" shell 'nc -z -w 2 127.0.0.1 5555 && echo open || echo closed') || continue
+    # Plain nc with no input, not `nc -z`: Android 12's toybox (0.8.4) has no -z, and the failure
+    # would read as closed and restart adbd every minute.
+    out=$(timeout 15 adb -s "$serial" shell 'nc -w 2 127.0.0.1 5555 </dev/null >/dev/null 2>&1 && echo open || echo closed') || continue
     case "$out" in *open*) continue ;; *closed*) ;; *) continue ;; esac
     echo "$serial: adbd not listening on 5555, switching to TCP mode"
     timeout 15 adb -s "$serial" tcpip 5555
