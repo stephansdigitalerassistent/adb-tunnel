@@ -11,6 +11,13 @@ Once started it stays on until Stop is pressed: it comes back by itself after th
 off — through restarts too — until the icon is pressed again. After a restart adbd still needs Wi-Fi
 once (see below); the tunnel waits for it and says so.
 
+Android asks "Debugging über WLAN in diesem Netzwerk zulassen?" the first time Wireless debugging
+comes on at a Wi-Fi access point. The notification's *Ask for this Wi-Fi* button brings that
+question up on purpose (it switches Wireless debugging off and on), so it can be answered once —
+with *Immer in diesem Netzwerk zulassen* ticked — while someone is next to the phone, instead of
+surprising its owner later. Android remembers the access point, not the Wi-Fi name: with a
+router plus an extender, press it once near each.
+
 ## The server side
 
 The phone logs in as `adbtunnel`, an account that can only listen on its own loopback port:

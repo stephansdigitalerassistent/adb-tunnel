@@ -56,6 +56,11 @@ class TunnelService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_ASK_WIFI) {
+            // The button only exists on the running tunnel's notification, so nothing else to start.
+            Thread({ askForThisWifi() }, "ask-wifi").start()
+            return START_STICKY
+        }
         // No intent: Android restarting it after killing the process. Stop wins over that.
         if (intent == null && !wanted(this)) {
             stopSelf()
@@ -250,6 +255,33 @@ class TunnelService : Service() {
         }
     }
 
+    /**
+     * Makes Android ask "Debugging über WLAN in diesem Netzwerk zulassen?" for the Wi-Fi the phone
+     * is on now, so someone standing next to the phone can allow it once for good. Android asks
+     * only when Wireless debugging is switched on while on an access point not allowed yet, so it is
+     * switched off and on again; on an access point already allowed that passes silently. Android
+     * remembers the access point (BSSID), not the Wi-Fi name: a router with an extender needs this
+     * once near each of them.
+     *
+     * TCP mode (port 5555), which the tunnel prefers, is not touched by this.
+     */
+    private fun askForThisWifi() {
+        if (!onWifi()) {
+            update("Ask for this Wi-Fi: not on Wi-Fi")
+            return
+        }
+        try {
+            Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 0)
+            Thread.sleep(1_000)
+            Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
+            Log.i(TAG, "switched Wireless debugging off and on, so Android asks for this Wi-Fi")
+        } catch (e: SecurityException) {
+            update("Ask for this Wi-Fi: WRITE_SECURE_SETTINGS not granted")
+        } catch (e: InterruptedException) {
+            // Only the sleep; nothing to undo — the tunnel loop switches it back on anyway.
+        }
+    }
+
     /** Anything but an "Up" line counts as down: waiting, connecting, retrying. */
     private fun update(text: String, isUp: Boolean = false) {
         if (text == status && isUp == up) return
@@ -275,6 +307,9 @@ class TunnelService : Service() {
         val stop = PendingIntent.getService(
             this, 0, Intent(this, TunnelService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE
         )
+        val askWifi = PendingIntent.getService(
+            this, 1, Intent(this, TunnelService::class.java).setAction(ACTION_ASK_WIFI), PendingIntent.FLAG_IMMUTABLE
+        )
         return Notification.Builder(this, CHANNEL)
             // Full-colour icons rather than the usual white mask: One UI shows them in colour in the
             // status bar — green with arrows while up, red with a cross otherwise.
@@ -285,6 +320,11 @@ class TunnelService : Service() {
             .setOnlyAlertOnce(true)
             .addAction(
                 Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat_tunnel), "Stop", stop).build()
+            )
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, R.drawable.ic_stat_tunnel), "Ask for this Wi-Fi", askWifi
+                ).build()
             )
             .build()
     }
@@ -331,6 +371,7 @@ class TunnelService : Service() {
         }
 
         private const val ACTION_STOP = "ch.heuscher.adbtunnel.STOP"
+        private const val ACTION_ASK_WIFI = "ch.heuscher.adbtunnel.ASK_WIFI"
         private const val CHANNEL = "tunnel"
         private const val NOTIFICATION_ID = 1
         private const val ADB_WIFI_ENABLED = "adb_wifi_enabled"
