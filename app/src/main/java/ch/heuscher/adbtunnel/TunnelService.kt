@@ -247,9 +247,17 @@ class TunnelService : Service() {
     @Suppress("DEPRECATION") // allNetworks: a Wi-Fi without internet is not the default network, but counts here.
     private fun currentWifiNetwork(): Network? {
         val cm = getSystemService(ConnectivityManager::class.java) ?: return null
-        return cm.allNetworks.firstOrNull {
-            cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-        }
+        return cm.allNetworks.firstOrNull { isWifiClient(cm.getNetworkCapabilities(it)) }
+    }
+
+    /**
+     * Joined to a Wi-Fi. Since Android 15 this phone's own hotspot shows up as a Wi-Fi network too,
+     * marked LOCAL_NETWORK; without leaving that out, sharing mobile data counted as an unknown Wi-Fi.
+     */
+    private fun isWifiClient(caps: NetworkCapabilities?): Boolean {
+        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true) return false
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM ||
+            !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_LOCAL_NETWORK)
     }
 
     private fun onWifi(): Boolean = currentWifiNetwork() != null
@@ -260,7 +268,7 @@ class TunnelService : Service() {
         try {
             for (network in cm.allNetworks) {
                 val caps = cm.getNetworkCapabilities(network) ?: continue
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                if (isWifiClient(caps)) {
                     val wifiInfo = caps.transportInfo as? WifiInfo
                     val bssid = AllowedWifi.clean(wifiInfo?.bssid)
                     if (bssid != null) return bssid
