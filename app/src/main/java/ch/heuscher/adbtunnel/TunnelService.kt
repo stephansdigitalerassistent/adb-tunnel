@@ -463,7 +463,8 @@ class TunnelService : Service() {
     /**
      * "Ask for this Wi-Fi" only makes sense on a Wi-Fi not allowed yet: off Wi-Fi there is nothing to
      * ask, and on an allowed access point it would only switch Wireless debugging off and on. An
-     * unreadable BSSID counts as not allowed. Re-posts the notification when that changes.
+     * unreadable BSSID counts as not allowed. Re-posts the notification when that changes, which
+     * also turns the icon orange or back.
      */
     private fun refreshAskButton() {
         if (!running) return
@@ -497,8 +498,15 @@ class TunnelService : Service() {
         askShown = showAsk
         val builder = Notification.Builder(this, CHANNEL)
             // Full-colour icons rather than the usual white mask: One UI shows them in colour in the
-            // status bar — green with arrows while up, red with a cross otherwise.
-            .setSmallIcon(if (up) R.mipmap.ic_tunnel_up else R.mipmap.ic_tunnel_down)
+            // status bar — green with arrows while up, orange with a question mark while up on a
+            // Wi-Fi not allowed yet, red with a cross otherwise.
+            .setSmallIcon(
+                when {
+                    !up -> R.mipmap.ic_tunnel_down
+                    showAsk -> R.mipmap.ic_tunnel_unknown_wifi
+                    else -> R.mipmap.ic_tunnel_up
+                }
+            )
             .setContentTitle("adb tunnel")
             .setContentText(status)
             .setOngoing(true)

@@ -2,4 +2,5 @@
 <resources>
     <color name="tunnel_up">#FF2E7D32</color>
     <color name="tunnel_down">#FFC62828</color>
+    <color name="tunnel_unknown_wifi">#FFEF6C00</color>
 </resources>
