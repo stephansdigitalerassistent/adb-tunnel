@@ -55,6 +55,7 @@ class TunnelService : Service() {
     private var fallbackAttemptedNetwork: Network? = null
     private var lastWifiDecision: String? = null
     @Volatile private var verifyingBssid: String? = null
+    @Volatile private var askShown = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -117,6 +118,7 @@ class TunnelService : Service() {
         try {
             while (!Thread.currentThread().isInterrupted) {
                 keepAdbdOn()
+                refreshAskButton()
                 val port = AdbPort.find()
                 if (port == null) {
                     waitForAdb()
@@ -137,12 +139,13 @@ class TunnelService : Service() {
                     update(upText(remotePort, current), isUp = true)
                     while (connected.isConnected) {
                         nap(15_000)
+                        refreshAskButton()
                         if (!connected.isConnected) continue
                         // A Wireless debugging port dies with the Wi-Fi, TCP mode does not: move to
                         // it as soon as it is there, even while the current port still answers.
                         val next = when {
                             current != TCP_MODE_PORT && AdbPort.isAdb(TCP_MODE_PORT) -> TCP_MODE_PORT
-                            AdbPort.isAdb(current) -> continue
+                            AdbPort.isAdb(current) -> current
                             else -> {
                                 keepAdbdOn()
                                 AdbPort.find()
@@ -226,8 +229,11 @@ class TunnelService : Service() {
                     Log.i(TAG, "default network changed, reconnecting")
                     session?.let { Thread { it.disconnect() }.start() }
                 }
+                refreshAskButton()
                 napLock.withLock { networkChanged.signalAll() }
             }
+
+            override fun onLost(network: Network) = refreshAskButton()
         }
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(callback)
         networkCallback = callback
@@ -297,6 +303,7 @@ class TunnelService : Service() {
                 if (Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1) {
                     allowedWifi.add(bssid)
                     Log.i(TAG, "learned allowed Wi-Fi: $bssid")
+                    refreshAskButton()
                 } else {
                     allowedWifi.remove(bssid)
                     Log.i(TAG, "Wireless debugging flipped back to 0 on $bssid; not allowed")
@@ -316,6 +323,7 @@ class TunnelService : Service() {
                 if (!onWifi()) return@Thread
                 if (Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1) {
                     currentBssid()?.let { allowedWifi.add(it) }
+                    refreshAskButton()
                 }
             } catch (e: InterruptedException) {
                 // Interrupted
@@ -402,8 +410,11 @@ class TunnelService : Service() {
      * TCP mode (port 5555), which the tunnel prefers, is not touched by this.
      */
     private fun askForThisWifi() {
+        // Pressed on a notification from before the Wi-Fi went: nothing to ask. Only logged — the
+        // status line belongs to the tunnel loop, which would not write "Up" back while adb answers.
         if (!onWifi()) {
-            update("Ask for this Wi-Fi: not on Wi-Fi")
+            Log.i(TAG, "Ask for this Wi-Fi: not on Wi-Fi")
+            refreshAskButton()
             return
         }
         try {
@@ -428,12 +439,13 @@ class TunnelService : Service() {
                             allowedWifi.add(bssid)
                             Log.i(TAG, "learned allowed Wi-Fi: $bssid")
                         }
+                        refreshAskButton()
                         break
                     }
                 }
             }
         } catch (e: SecurityException) {
-            update("Ask for this Wi-Fi: WRITE_SECURE_SETTINGS not granted")
+            Log.w(TAG, "Ask for this Wi-Fi: WRITE_SECURE_SETTINGS not granted")
         } catch (e: InterruptedException) {
             // Only the sleep; nothing to undo — the tunnel loop switches it back on anyway.
         }
@@ -447,6 +459,20 @@ class TunnelService : Service() {
         Log.i(TAG, text)
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
     }
+
+    /**
+     * "Ask for this Wi-Fi" only makes sense on a Wi-Fi not allowed yet: off Wi-Fi there is nothing to
+     * ask, and on an allowed access point it would only switch Wireless debugging off and on. An
+     * unreadable BSSID counts as not allowed. Re-posts the notification when that changes.
+     */
+    private fun refreshAskButton() {
+        if (!running) return
+        if (wantAskButton() != askShown) {
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
+        }
+    }
+
+    private fun wantAskButton(): Boolean = onWifi() && !allowedWifi.contains(currentBssid())
 
     private fun goForeground() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
@@ -467,7 +493,9 @@ class TunnelService : Service() {
         val askWifi = PendingIntent.getService(
             this, 1, Intent(this, TunnelService::class.java).setAction(ACTION_ASK_WIFI), PendingIntent.FLAG_IMMUTABLE
         )
-        return Notification.Builder(this, CHANNEL)
+        val showAsk = wantAskButton()
+        askShown = showAsk
+        val builder = Notification.Builder(this, CHANNEL)
             // Full-colour icons rather than the usual white mask: One UI shows them in colour in the
             // status bar — green with arrows while up, red with a cross otherwise.
             .setSmallIcon(if (up) R.mipmap.ic_tunnel_up else R.mipmap.ic_tunnel_down)
@@ -478,12 +506,14 @@ class TunnelService : Service() {
             .addAction(
                 Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat_tunnel), "Stop", stop).build()
             )
-            .addAction(
+        if (showAsk) {
+            builder.addAction(
                 Notification.Action.Builder(
                     Icon.createWithResource(this, R.drawable.ic_stat_tunnel), "Ask for this Wi-Fi", askWifi
                 ).build()
             )
-            .build()
+        }
+        return builder.build()
     }
 
     @Suppress("DEPRECATION") // WIFI_MODE_FULL_HIGH_PERF: the low-latency mode only holds while in the foreground UI.
