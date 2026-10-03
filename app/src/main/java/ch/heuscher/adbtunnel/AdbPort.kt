@@ -1,5 +1,8 @@
 package ch.heuscher.adbtunnel
 
+import android.content.Context
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.util.Log
 import java.io.DataInputStream
 import java.net.ConnectException
@@ -10,6 +13,8 @@ import java.nio.ByteOrder
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -18,8 +23,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * Wireless debugging picks a new random port every time it is switched on, and a reboot or system
  * update also drops the fixed 5555 that `adb tcpip` sets — which is exactly what left the old
  * tunnel pointing at nothing. So nothing here is trusted from memory: 5555 is tried first, then
- * the port of the last scan, then every ephemeral port on loopback, and a listener only counts
- * when it answers an adb handshake.
+ * the port of the last search, then the port adbd announces over mDNS, then every ephemeral port
+ * on loopback, and a listener only counts when it answers an adb handshake.
  */
 object AdbPort {
     private const val FIXED = 5555
@@ -34,13 +39,76 @@ object AdbPort {
     private const val RETRY_BUDGET_MS = 30_000
     private const val NONE = -1
 
-    /** The port of the last successful scan: adbd keeps it until Wireless debugging restarts. */
+    /** What adbd announces its Wireless debugging port as, for `adb mdns services` to find. */
+    private const val MDNS_TYPE = "_adb-tls-connect._tcp"
+    private const val MDNS_WAIT_MS = 5_000L
+
+    /** The port of the last successful search: adbd keeps it until Wireless debugging restarts. */
     @Volatile
     private var lastFound = NONE
 
-    fun find(): Int? {
+    fun find(context: Context): Int? {
         if (isAdb(FIXED)) return FIXED
         lastFound.takeIf { it != NONE && isAdb(it) }?.let { return it }
+        viaMdns(context)?.let {
+            lastFound = it
+            return it
+        }
+        return scan()
+    }
+
+    /**
+     * Asks Android's service discovery for the port instead of trying them all: a few seconds
+     * where the scan takes a minute or two on a slow phone. Other phones on the Wi-Fi announce
+     * theirs too, so a port only counts when adbd answers on it here.
+     */
+    private fun viaMdns(context: Context): Int? {
+        val nsd = context.getSystemService(NsdManager::class.java) ?: return null
+        val started = System.currentTimeMillis()
+        val deadline = started + MDNS_WAIT_MS
+        val announced = LinkedBlockingQueue<NsdServiceInfo>()
+        val discovery = object : NsdManager.DiscoveryListener {
+            override fun onServiceFound(info: NsdServiceInfo) { announced.add(info) }
+            override fun onServiceLost(info: NsdServiceInfo) {}
+            override fun onDiscoveryStarted(type: String) {}
+            override fun onDiscoveryStopped(type: String) {}
+            override fun onStartDiscoveryFailed(type: String, error: Int) {}
+            override fun onStopDiscoveryFailed(type: String, error: Int) {}
+        }
+        try {
+            nsd.discoverServices(MDNS_TYPE, NsdManager.PROTOCOL_DNS_SD, discovery)
+        } catch (e: Exception) {
+            Log.w(TAG, "mDNS: ${e.message}")
+            return null
+        }
+        try {
+            while (true) {
+                val info = announced.poll(deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS) ?: break
+                // One at a time: before Android 14 a second resolve fails while one is running.
+                val resolved = LinkedBlockingQueue<Int>()
+                @Suppress("DEPRECATION")
+                nsd.resolveService(info, object : NsdManager.ResolveListener {
+                    override fun onServiceResolved(info: NsdServiceInfo) { resolved.add(info.port) }
+                    override fun onResolveFailed(info: NsdServiceInfo, error: Int) { resolved.add(NONE) }
+                })
+                val port = resolved.poll(deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS) ?: break
+                if (port != NONE && isAdb(port)) {
+                    Log.i(TAG, "mDNS: $port after ${System.currentTimeMillis() - started} ms")
+                    return port
+                }
+            }
+            Log.i(TAG, "mDNS: nothing after ${System.currentTimeMillis() - started} ms")
+            return null
+        } finally {
+            try {
+                nsd.stopServiceDiscovery(discovery)
+            } catch (e: Exception) {
+                // never started
+            }
+        }
+    }
+
+    private fun scan(): Int? {
         val started = System.currentTimeMillis()
         val found = AtomicInteger(NONE)
         val unsure = ConcurrentLinkedQueue<Int>()

@@ -119,7 +119,7 @@ class TunnelService : Service() {
             while (!Thread.currentThread().isInterrupted) {
                 keepAdbdOn()
                 refreshAskButton()
-                val port = AdbPort.find()
+                val port = AdbPort.find(this)
                 if (port == null) {
                     waitForAdb()
                     continue
@@ -148,7 +148,7 @@ class TunnelService : Service() {
                             AdbPort.isAdb(current) -> current
                             else -> {
                                 keepAdbdOn()
-                                AdbPort.find()
+                                AdbPort.find(this)
                             }
                         }
                         if (next == null) {
