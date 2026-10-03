@@ -25,10 +25,12 @@ object AdbPort {
     private const val FIXED = 5555
     private val EPHEMERAL = 32768..60999
 
-    // Few threads and a generous timeout: with 64 threads and 200 ms a Galaxy S10+ spent over a
-    // minute per pass at full load and still missed the port adbd was listening on.
+    // Few threads: with 64 a Galaxy S10+ spent over a minute per pass at full load and still
+    // missed the port adbd was listening on. Even with 8 it leaves hundreds of connects without an
+    // answer, so the first pass does not wait long for one and the second look does.
     private const val SCAN_THREADS = 8
-    private const val SCAN_TIMEOUT_MS = 1_000
+    private const val SCAN_TIMEOUT_MS = 300
+    private const val RETRY_TIMEOUT_MS = 2_000
     private const val RETRY_BUDGET_MS = 30_000
     private const val NONE = -1
 
@@ -68,7 +70,7 @@ object AdbPort {
             val deadline = System.currentTimeMillis() + RETRY_BUDGET_MS
             unsure.asSequence()
                 .takeWhile { System.currentTimeMillis() < deadline && !Thread.currentThread().isInterrupted }
-                .firstOrNull { probe(it, SCAN_TIMEOUT_MS) == Probe.OPEN && isAdb(it) }
+                .firstOrNull { probe(it, RETRY_TIMEOUT_MS) == Probe.OPEN && isAdb(it) }
                 ?.let { found.set(it) }
         }
         val port = found.get().takeIf { it != NONE }
