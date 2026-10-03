@@ -29,7 +29,7 @@ object AdbPort {
     // minute per pass at full load and still missed the port adbd was listening on.
     private const val SCAN_THREADS = 8
     private const val SCAN_TIMEOUT_MS = 1_000
-    private const val RETRY_TIMEOUT_MS = 3_000
+    private const val RETRY_BUDGET_MS = 30_000
     private const val NONE = -1
 
     /** The port of the last successful scan: adbd keeps it until Wireless debugging restarts. */
@@ -61,14 +61,22 @@ object AdbPort {
         } finally {
             pool.shutdownNow()
         }
-        // A port that neither accepted nor refused in time gets a second, unhurried look.
-        val retried = unsure.size
+        // A port that neither accepted nor refused in time gets a second look, one at a time: when
+        // the scan's own load was the reason, it answers at once now. Bounded, in case it was not.
+        val scanMs = System.currentTimeMillis() - started
         if (found.get() == NONE) {
-            unsure.firstOrNull { probe(it, RETRY_TIMEOUT_MS) == Probe.OPEN && isAdb(it) }
+            val deadline = System.currentTimeMillis() + RETRY_BUDGET_MS
+            unsure.asSequence()
+                .takeWhile { System.currentTimeMillis() < deadline && !Thread.currentThread().isInterrupted }
+                .firstOrNull { probe(it, SCAN_TIMEOUT_MS) == Probe.OPEN && isAdb(it) }
                 ?.let { found.set(it) }
         }
         val port = found.get().takeIf { it != NONE }
-        Log.i(TAG, "port scan: ${port ?: "nothing"} after ${System.currentTimeMillis() - started} ms, $retried unsure")
+        Log.i(
+            TAG,
+            "port scan: ${port ?: "nothing"} after $scanMs ms, ${unsure.size} without an answer, " +
+                "${System.currentTimeMillis() - started - scanMs} ms on a second look"
+        )
         lastFound = port ?: NONE
         return port
     }
