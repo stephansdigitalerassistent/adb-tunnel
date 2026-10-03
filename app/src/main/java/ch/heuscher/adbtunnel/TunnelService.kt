@@ -506,13 +506,14 @@ class TunnelService : Service() {
         askShown = showAsk
         val builder = Notification.Builder(this, CHANNEL)
             // Full-colour icons rather than the usual white mask: One UI shows them in colour in the
-            // status bar — green with arrows while up, orange with a question mark while up on a
-            // Wi-Fi not allowed yet, red with a cross otherwise.
+            // status bar — green with arrows while up, whatever the Wi-Fi: a tunnel that works has
+            // nothing to ask. Orange with a question mark while down on a Wi-Fi not allowed yet
+            // (asking may be what is missing), red with a cross otherwise.
             .setSmallIcon(
                 when {
-                    !up -> R.mipmap.ic_tunnel_down
+                    up -> R.mipmap.ic_tunnel_up
                     showAsk -> R.mipmap.ic_tunnel_unknown_wifi
-                    else -> R.mipmap.ic_tunnel_up
+                    else -> R.mipmap.ic_tunnel_down
                 }
             )
             .setContentTitle("adb tunnel")
