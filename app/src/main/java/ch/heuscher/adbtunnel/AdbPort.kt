@@ -1,63 +1,101 @@
 package ch.heuscher.adbtunnel
 
+import android.util.Log
 import java.io.DataInputStream
+import java.net.ConnectException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Finds the port this phone's adbd is listening on.
  *
  * Wireless debugging picks a new random port every time it is switched on, and a reboot or system
  * update also drops the fixed 5555 that `adb tcpip` sets — which is exactly what left the old
- * tunnel pointing at nothing. So nothing here is remembered: 5555 is tried first, then every
- * ephemeral port on loopback, and a listener only counts when it answers an adb handshake.
+ * tunnel pointing at nothing. So nothing here is trusted from memory: 5555 is tried first, then
+ * the port of the last scan, then every ephemeral port on loopback, and a listener only counts
+ * when it answers an adb handshake.
  */
 object AdbPort {
     private const val FIXED = 5555
     private val EPHEMERAL = 32768..60999
 
+    // Few threads and a generous timeout: with 64 threads and 200 ms a Galaxy S10+ spent over a
+    // minute per pass at full load and still missed the port adbd was listening on.
+    private const val SCAN_THREADS = 8
+    private const val SCAN_TIMEOUT_MS = 1_000
+    private const val RETRY_TIMEOUT_MS = 3_000
+    private const val NONE = -1
+
+    /** The port of the last successful scan: adbd keeps it until Wireless debugging restarts. */
+    @Volatile
+    private var lastFound = NONE
+
     fun find(): Int? {
         if (isAdb(FIXED)) return FIXED
-        val pool = Executors.newFixedThreadPool(64)
+        lastFound.takeIf { it != NONE && isAdb(it) }?.let { return it }
+        val started = System.currentTimeMillis()
+        val found = AtomicInteger(NONE)
+        val unsure = ConcurrentLinkedQueue<Int>()
+        val next = AtomicInteger(EPHEMERAL.first)
+        val pool = Executors.newFixedThreadPool(SCAN_THREADS)
         try {
-            val open = EPHEMERAL.chunked(512)
-                .map { chunk -> pool.submit(Callable { chunk.filter(::isOpen) }) }
-                .flatMap { it.get() }
-            return open.firstOrNull(::isAdb)
+            (1..SCAN_THREADS).map {
+                pool.submit(Callable {
+                    while (found.get() == NONE && !Thread.currentThread().isInterrupted) {
+                        val port = next.getAndIncrement()
+                        if (port > EPHEMERAL.last) break
+                        when (probe(port, SCAN_TIMEOUT_MS)) {
+                            Probe.OPEN -> if (isAdb(port)) found.compareAndSet(NONE, port)
+                            Probe.UNSURE -> unsure.add(port)
+                            Probe.CLOSED -> {}
+                        }
+                    }
+                })
+            }.forEach { it.get() }
         } finally {
             pool.shutdownNow()
         }
+        // A port that neither accepted nor refused in time gets a second, unhurried look.
+        val retried = unsure.size
+        if (found.get() == NONE) {
+            unsure.firstOrNull { probe(it, RETRY_TIMEOUT_MS) == Probe.OPEN && isAdb(it) }
+                ?.let { found.set(it) }
+        }
+        val port = found.get().takeIf { it != NONE }
+        Log.i(TAG, "port scan: ${port ?: "nothing"} after ${System.currentTimeMillis() - started} ms, $retried unsure")
+        lastFound = port ?: NONE
+        return port
     }
 
-    private fun isOpen(port: Int): Boolean = try {
-        Socket().use { it.connect(InetSocketAddress(LOOPBACK, port), 200) }
-        true
+    private enum class Probe { OPEN, CLOSED, UNSURE }
+
+    private fun probe(port: Int, timeoutMs: Int): Probe = try {
+        Socket().use { it.connect(InetSocketAddress(LOOPBACK, port), timeoutMs) }
+        Probe.OPEN
+    } catch (e: ConnectException) {
+        Probe.CLOSED
     } catch (e: Exception) {
-        false
+        Probe.UNSURE
     }
 
-    /**
-     * Sends an adb CNXN and reads the first reply. adbd answers CNXN or AUTH (legacy tcpip mode)
-     * or STLS (Wireless debugging). Nothing past that is sent, so no authorization prompt appears.
-     */
+    /** Sends an adb CNXN and reads the first reply. adbd answers CNXN or AUTH (legacy tcpip mode)
+     * or STLS (Wireless debugging). Nothing past that is sent, so no authorization prompt appears. */
     fun isAdb(port: Int): Boolean = try {
         Socket().use { socket ->
-            socket.connect(InetSocketAddress(LOOPBACK, port), 500)
-            socket.soTimeout = 1500
+            socket.connect(InetSocketAddress(LOOPBACK, port), 1_000)
+            socket.soTimeout = 3_000
             val payload = "host::\u0000".toByteArray(Charsets.US_ASCII)
             val checksum = payload.fold(0) { sum, b -> sum + (b.toInt() and 0xff) }
             val header = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN)
                 .putInt(A_CNXN).putInt(A_VERSION).putInt(MAX_PAYLOAD)
                 .putInt(payload.size).putInt(checksum).putInt(A_CNXN xor -1)
-            socket.getOutputStream().apply {
-                write(header.array())
-                write(payload)
-                flush()
-            }
+            socket.getOutputStream().apply { write(header.array()); write(payload); flush() }
             val reply = ByteArray(4)
             DataInputStream(socket.getInputStream()).readFully(reply)
             String(reply, Charsets.US_ASCII) in ADBD_REPLIES
