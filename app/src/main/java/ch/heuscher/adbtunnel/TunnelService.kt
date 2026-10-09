@@ -385,6 +385,7 @@ class TunnelService : Service() {
                     if (!allowedWifi.contains(bssid)) verifyWifi(bssid)
                     logWifiDecision("allowed:$bssid:on", "Wireless debugging is on; Wi-Fi $bssid is allowed")
                 } else if (allowedWifi.contains(bssid)) {
+                    AllowDialogService.expectQuestion(bssid)
                     Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
                     logWifiDecision("allowed:$bssid:switched_on", "switched Wireless debugging on for allowed Wi-Fi $bssid")
                     verifyWifi(bssid)

@@ -19,81 +19,145 @@ import android.view.accessibility.AccessibilityNodeInfo
  * until someone stands next to the phone. The question names the access point (BSSID); it is
  * answered only when [AllowedWifi] holds that BSSID, which gets there by a person allowing it or by
  * the server sending Android's own list. A new access point is still a person's decision.
+ *
+ * The tunnel says when it switches Wireless debugging on ([expectQuestion]) and the service then
+ * looks for the question for a while: right after a restart the phone is slow, and waiting for
+ * Android to report the window was not enough there (S10+, 2026-10-09: reported nothing at all).
  */
 class AllowDialogService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private val allowedWifi by lazy { AllowedWifi(this) }
+    private var looksLeft = 0
+    private var lastSeen = "nothing looked at"
 
     override fun onServiceConnected() {
         Log.i(TAG, "allow-dialog service connected")
+        instance = this
         // The question may be up already: after a restart the tunnel can be quicker than this.
-        look(ATTEMPTS, announced = false)
+        look(if (expecting() != null) EXPECTED_LOOKS else EVENT_LOOKS)
+    }
+
+    override fun onDestroy() {
+        instance = null
+        handler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         if (event.packageName?.toString() != SYSTEM_UI) return
-        if (event.className?.toString()?.contains(DIALOG_CLASS) != true) return
-        look(ATTEMPTS, announced = true)
+        look(EVENT_LOOKS)
     }
 
     override fun onInterrupt() = Unit
 
-    /** The window's content arrives a moment after the window, so this looks a few times. */
-    private fun look(attemptsLeft: Int, announced: Boolean) {
-        handler.removeCallbacksAndMessages(null)
-        if (answer(announced) || attemptsLeft <= 1) return
-        handler.postDelayed({ look(attemptsLeft - 1, announced) }, RETRY_MS)
+    /** Looks now and then every [LOOK_MS], at least [times] times, until the question is dealt with. */
+    private fun look(times: Int) {
+        val idle = looksLeft <= 0
+        if (times > looksLeft) looksLeft = times
+        if (idle) lookOnce()
     }
 
-    /**
-     * True when there is nothing more to do: the question was answered, or is not ours to answer.
-     * [announced] says Android reported the question's window by name; without that, only a window
-     * holding Android's own "Always allow on this network" box counts as the question.
-     */
-    private fun answer(announced: Boolean): Boolean {
-        val root = rootInActiveWindow ?: return false
-        if (root.packageName?.toString() != SYSTEM_UI) return false
-        val always = root.findAccessibilityNodeInfosByViewId(ALWAYS_ID).firstOrNull()
-        if (always == null && !announced) return false
-        val texts = ArrayList<String>()
-        collectTexts(root, texts)
-        val named = texts.flatMap { text -> MAC.findAll(text.lowercase()).map { it.value } }.toSet()
-        val bssid = named.singleOrNull()
-        // Not drawn yet, or another System UI window is in front: look again.
-        if (named.isEmpty() && always == null) return false
-        if (bssid == null || !allowedWifi.contains(bssid)) {
-            Log.i(TAG, "Android asks about Wi-Fi $named, not allowed before: left for a person")
-            return true
+    private fun lookOnce() {
+        val done = try {
+            answer()
+        } catch (e: RuntimeException) {
+            // A window that goes away while it is read; the next look sees what is there then.
+            lastSeen = "failed: $e"
+            false
         }
-        val allow = root.findAccessibilityNodeInfosByViewId(ALLOW_ID).firstOrNull()
-        if (allow == null) {
-            Log.w(TAG, "Android asks about Wi-Fi $bssid, but its Allow button was not found: $texts")
-            return true
+        looksLeft = if (done) 0 else looksLeft - 1
+        if (looksLeft > 0) {
+            handler.postDelayed(::lookOnce, LOOK_MS)
+        } else if (!done && expecting() != null) {
+            Log.w(TAG, "Wireless debugging was switched on, but Android's question was not found: $lastSeen")
+            expectedUntil = 0
         }
-        if (always != null && !always.isChecked) always.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        val pressed = allow.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        Log.i(TAG, "Android asked about Wi-Fi $bssid, allowed before: pressed Allow ($pressed)")
-        return true
     }
 
-    private fun collectTexts(node: AccessibilityNodeInfo, into: MutableList<String>) {
-        node.text?.toString()?.takeIf { it.isNotBlank() }?.let { into.add(it) }
+    /** True when there is nothing more to do: the question was answered, or is not ours to answer. */
+    private fun answer(): Boolean {
+        val roots = (windows.mapNotNull { it.root } + listOfNotNull(rootInActiveWindow))
+            .filter { it.packageName?.toString() == SYSTEM_UI }
+        val seen = ArrayList<String>()
+        for (root in roots) {
+            val nodes = ArrayList<AccessibilityNodeInfo>()
+            collect(root, nodes)
+            val texts = nodes.mapNotNull { it.text?.toString()?.takeIf { text -> text.isNotBlank() } }
+            val named = texts.flatMap { text -> MAC.findAll(text.lowercase()).map { it.value } }.toSet()
+            val always = nodes.firstOrNull { it.viewIdResourceName == ALWAYS_ID }
+                ?: nodes.singleOrNull { it.isCheckable }
+            val buttons = nodes.filter { it.isClickable && it.className?.toString()?.endsWith("Button") == true }
+            // Android's question, and nothing else in System UI: one access point, the "always" box,
+            // and two buttons. Allow is the dialog's positive button, the last of the two.
+            val allow = nodes.firstOrNull { it.viewIdResourceName == ALLOW_ID }
+                ?: buttons.takeIf { it.size == 2 }?.last()
+            if (named.size != 1 || always == null || allow == null) {
+                seen += "window(${nodes.size} nodes, Wi-Fi $named, ${buttons.size} buttons, " +
+                    "box=${always != null}, ${texts.take(8)})"
+                continue
+            }
+            val bssid = named.single()
+            if (!allowedWifi.contains(bssid) && bssid != expecting()) {
+                Log.i(TAG, "Android asks about Wi-Fi $bssid, not allowed before: left for a person")
+                return true
+            }
+            if (!always.isChecked) always.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            val pressed = allow.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            Log.i(
+                TAG,
+                "Android asked about Wi-Fi $bssid, allowed before: pressed \"${allow.text}\" " +
+                    "(${allow.viewIdResourceName}, $pressed)"
+            )
+            expectedUntil = 0
+            return true
+        }
+        lastSeen = "active window ${rootInActiveWindow?.packageName}, ${windows.size} windows, System UI: $seen"
+        return false
+    }
+
+    private fun collect(node: AccessibilityNodeInfo, into: MutableList<AccessibilityNodeInfo>) {
+        if (into.size >= MAX_NODES) return
+        into.add(node)
         for (i in 0 until node.childCount) {
-            node.getChild(i)?.let { collectTexts(it, into) }
+            node.getChild(i)?.let { collect(it, into) }
         }
     }
 
     companion object {
         private const val TAG = "AdbTunnel"
         private const val SYSTEM_UI = "com.android.systemui"
-        private const val DIALOG_CLASS = "WifiDebugging"
         private const val ALWAYS_ID = "com.android.systemui:id/alwaysUse"
         private const val ALLOW_ID = "android:id/button1"
-        private const val ATTEMPTS = 6
-        private const val RETRY_MS = 300L
+        private const val LOOK_MS = 500L
+        private const val EVENT_LOOKS = 6
+        private const val EXPECTED_LOOKS = 60
+        private const val EXPECT_MS = 60_000L
+        private const val MAX_NODES = 400
         private val MAC = Regex("([0-9a-f]{2}:){5}[0-9a-f]{2}")
         private const val ENABLED_SERVICES = Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+
+        @Volatile
+        private var instance: AllowDialogService? = null
+
+        @Volatile
+        private var expected: String? = null
+
+        @Volatile
+        private var expectedUntil = 0L
+
+        private fun expecting(): String? = expected.takeIf { System.currentTimeMillis() < expectedUntil }
+
+        /**
+         * The tunnel is about to switch Wireless debugging on at [bssid], an allowed access point.
+         * Remembered for a minute, because the tunnel drops the access point from its list when
+         * Android switches Wireless debugging back off to ask, which is before the answer.
+         */
+        fun expectQuestion(bssid: String) {
+            expected = AllowedWifi.clean(bssid) ?: return
+            expectedUntil = System.currentTimeMillis() + EXPECT_MS
+            instance?.let { service -> service.handler.post { service.look(EXPECTED_LOOKS) } }
+        }
 
         /**
          * Switches this service on. Android offers that only in its settings, to a person; with
