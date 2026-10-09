@@ -15,6 +15,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -48,14 +49,20 @@ object AdbPort {
     @Volatile
     private var lastFound = NONE
 
-    fun find(context: Context): Int? {
+    /**
+     * [wirelessOn] reads Android's Wireless debugging switch. While it is off adbd listens on no
+     * port but the fixed one, so there is nothing to search for: Android switches it back off
+     * when it asks whether to allow this Wi-Fi, and a scan then only costs minutes.
+     */
+    fun find(context: Context, wirelessOn: () -> Boolean): Int? {
         if (isAdb(FIXED)) return FIXED
+        if (!wirelessOn()) return null
         lastFound.takeIf { it != NONE && isAdb(it) }?.let { return it }
         viaMdns(context)?.let {
             lastFound = it
             return it
         }
-        return scan()
+        return scan(wirelessOn)
     }
 
     /**
@@ -109,9 +116,10 @@ object AdbPort {
         }
     }
 
-    private fun scan(): Int? {
+    private fun scan(wirelessOn: () -> Boolean): Int? {
         val started = System.currentTimeMillis()
         val found = AtomicInteger(NONE)
+        val givenUp = AtomicBoolean(false)
         val unsure = ConcurrentLinkedQueue<Int>()
         val next = AtomicInteger(EPHEMERAL.first)
         val pool = Executors.newFixedThreadPool(SCAN_THREADS)
@@ -120,9 +128,10 @@ object AdbPort {
         // Galaxy S10+ 5555 came up during a six-minute scan and the tunnel stayed down to its end.
         val fixedWatch = Thread {
             try {
-                while (found.get() == NONE) {
+                while (found.get() == NONE && !givenUp.get()) {
                     Thread.sleep(FIXED_RECHECK_MS)
                     if (isAdb(FIXED)) found.compareAndSet(NONE, FIXED)
+                    else if (!wirelessOn()) givenUp.set(true)
                 }
             } catch (e: InterruptedException) {
                 // the scan is over
@@ -133,7 +142,9 @@ object AdbPort {
             try {
                 (1..SCAN_THREADS).map {
                     pool.submit(Callable {
-                        while (found.get() == NONE && !Thread.currentThread().isInterrupted) {
+                        while (found.get() == NONE && !givenUp.get() &&
+                            !Thread.currentThread().isInterrupted
+                        ) {
                             val port = next.getAndIncrement()
                             if (port > EPHEMERAL.last) break
                             when (probe(port, SCAN_TIMEOUT_MS)) {
@@ -151,11 +162,11 @@ object AdbPort {
             // when the scan's own load was the reason, it answers at once now. Bounded, in case it
             // was not.
             scanMs = System.currentTimeMillis() - started
-            if (found.get() == NONE) {
+            if (found.get() == NONE && !givenUp.get()) {
                 val deadline = System.currentTimeMillis() + RETRY_BUDGET_MS
                 unsure.asSequence()
                     .takeWhile {
-                        found.get() == NONE && System.currentTimeMillis() < deadline &&
+                        found.get() == NONE && !givenUp.get() && System.currentTimeMillis() < deadline &&
                             !Thread.currentThread().isInterrupted
                     }
                     .firstOrNull { probe(it, RETRY_TIMEOUT_MS) == Probe.OPEN && isAdb(it) }
@@ -167,7 +178,8 @@ object AdbPort {
         val port = found.get().takeIf { it != NONE }
         Log.i(
             TAG,
-            "port scan: ${port ?: "nothing"} after $scanMs ms, ${unsure.size} without an answer" +
+            "port scan: ${port ?: if (givenUp.get()) "given up, Wireless debugging went off," else "nothing"} " +
+                "after $scanMs ms, ${unsure.size} without an answer" +
                 "${unansweredRuns(unsure.sorted())}, " +
                 "${System.currentTimeMillis() - started - scanMs} ms on a second look"
         )

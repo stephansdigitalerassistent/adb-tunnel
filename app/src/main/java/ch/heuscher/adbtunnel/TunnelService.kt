@@ -119,7 +119,7 @@ class TunnelService : Service() {
             while (!Thread.currentThread().isInterrupted) {
                 keepAdbdOn()
                 refreshAskButton()
-                val port = AdbPort.find(this)
+                val port = AdbPort.find(this, ::wirelessDebuggingOn)
                 if (port == null) {
                     waitForAdb()
                     continue
@@ -148,7 +148,7 @@ class TunnelService : Service() {
                             AdbPort.isAdb(current) -> current
                             else -> {
                                 keepAdbdOn()
-                                AdbPort.find(this)
+                                AdbPort.find(this, ::wirelessDebuggingOn)
                             }
                         }
                         if (next == null) {
@@ -188,9 +188,19 @@ class TunnelService : Service() {
         nap(if (onWifi()) 5_000 else 30_000)
     }
 
-    private fun adbMissingText() =
-        if (onWifi()) "Waiting for Wireless debugging"
-        else "adb is off since the phone restarted: join any Wi-Fi once"
+    /**
+     * On a Wi-Fi Android has not allowed, waiting brings nothing: someone has to answer Android's
+     * question, and the button asks it again. A Galaxy S10+ (Android 12) forgets its allowed Wi-Fi
+     * with every restart, so there this is what a restart without a USB cable ends in.
+     */
+    private fun adbMissingText() = when {
+        !onWifi() -> "adb is off since the phone restarted: join any Wi-Fi once"
+        !wirelessDebuggingOn() && wantAskButton() -> "Not allowed on this Wi-Fi: press Ask for this Wi-Fi"
+        else -> "Waiting for Wireless debugging"
+    }
+
+    private fun wirelessDebuggingOn(): Boolean =
+        Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1
 
     private fun connect(): Session {
         val jsch = JSch()
