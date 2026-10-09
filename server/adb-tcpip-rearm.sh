@@ -44,8 +44,13 @@ for port in 5555 5556 5558 5559; do
     # Wireless debugging port (Termux, pairing) would be cut off by the restart.
     pid=$(sudo -n ss -Hltnp "sport = :$port" | grep '127\.0\.0\.1:' | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
     [ -n "$pid" ] && [ "$(ps -o user= -p "$pid")" = adbtunnel ] || continue
-    [ "$(adb -s "$serial" get-state 2>/dev/null)" = device ] ||
+    # Disconnect first: after adbd restarts behind the tunnel (the switch to TCP mode below does
+    # that) adb can keep the old connection as "offline", and `adb connect` alone then answers
+    # "already connected" and leaves it so.
+    if [ "$(adb -s "$serial" get-state 2>/dev/null)" != device ]; then
+        adb disconnect "$serial" >/dev/null 2>&1
         timeout 15 adb connect "$serial" >/dev/null 2>&1
+    fi
     [ "$(adb -s "$serial" get-state 2>/dev/null)" = device ] || continue
     sync_allowed_wifi "$serial"
     # Ask the port, not service.adb.tcp.port: that property stays 5555 after adbd has been stopped
