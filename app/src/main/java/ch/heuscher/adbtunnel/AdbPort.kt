@@ -37,6 +37,7 @@ object AdbPort {
     private const val SCAN_TIMEOUT_MS = 300
     private const val RETRY_TIMEOUT_MS = 2_000
     private const val RETRY_BUDGET_MS = 30_000
+    private const val FIXED_RECHECK_MS = 2_000L
     private const val NONE = -1
 
     /** What adbd announces its Wireless debugging port as, for `adb mdns services` to find. */
@@ -114,41 +115,89 @@ object AdbPort {
         val unsure = ConcurrentLinkedQueue<Int>()
         val next = AtomicInteger(EPHEMERAL.first)
         val pool = Executors.newFixedThreadPool(SCAN_THREADS)
+        // The scan takes minutes on a phone that leaves a third of the connects unanswered. TCP
+        // mode switched on meanwhile (the server's re-arm, a USB cable) must not wait for it: on a
+        // Galaxy S10+ 5555 came up during a six-minute scan and the tunnel stayed down to its end.
+        val fixedWatch = Thread {
+            try {
+                while (found.get() == NONE) {
+                    Thread.sleep(FIXED_RECHECK_MS)
+                    if (isAdb(FIXED)) found.compareAndSet(NONE, FIXED)
+                }
+            } catch (e: InterruptedException) {
+                // the scan is over
+            }
+        }.apply { isDaemon = true; start() }
+        val scanMs: Long
         try {
-            (1..SCAN_THREADS).map {
-                pool.submit(Callable {
-                    while (found.get() == NONE && !Thread.currentThread().isInterrupted) {
-                        val port = next.getAndIncrement()
-                        if (port > EPHEMERAL.last) break
-                        when (probe(port, SCAN_TIMEOUT_MS)) {
-                            Probe.OPEN -> if (isAdb(port)) found.compareAndSet(NONE, port)
-                            Probe.UNSURE -> unsure.add(port)
-                            Probe.CLOSED -> {}
+            try {
+                (1..SCAN_THREADS).map {
+                    pool.submit(Callable {
+                        while (found.get() == NONE && !Thread.currentThread().isInterrupted) {
+                            val port = next.getAndIncrement()
+                            if (port > EPHEMERAL.last) break
+                            when (probe(port, SCAN_TIMEOUT_MS)) {
+                                Probe.OPEN -> if (isAdb(port)) found.compareAndSet(NONE, port)
+                                Probe.UNSURE -> unsure.add(port)
+                                Probe.CLOSED -> {}
+                            }
                         }
+                    })
+                }.forEach { it.get() }
+            } finally {
+                pool.shutdownNow()
+            }
+            // A port that neither accepted nor refused in time gets a second look, one at a time:
+            // when the scan's own load was the reason, it answers at once now. Bounded, in case it
+            // was not.
+            scanMs = System.currentTimeMillis() - started
+            if (found.get() == NONE) {
+                val deadline = System.currentTimeMillis() + RETRY_BUDGET_MS
+                unsure.asSequence()
+                    .takeWhile {
+                        found.get() == NONE && System.currentTimeMillis() < deadline &&
+                            !Thread.currentThread().isInterrupted
                     }
-                })
-            }.forEach { it.get() }
+                    .firstOrNull { probe(it, RETRY_TIMEOUT_MS) == Probe.OPEN && isAdb(it) }
+                    ?.let { found.compareAndSet(NONE, it) }
+            }
         } finally {
-            pool.shutdownNow()
-        }
-        // A port that neither accepted nor refused in time gets a second look, one at a time: when
-        // the scan's own load was the reason, it answers at once now. Bounded, in case it was not.
-        val scanMs = System.currentTimeMillis() - started
-        if (found.get() == NONE) {
-            val deadline = System.currentTimeMillis() + RETRY_BUDGET_MS
-            unsure.asSequence()
-                .takeWhile { System.currentTimeMillis() < deadline && !Thread.currentThread().isInterrupted }
-                .firstOrNull { probe(it, RETRY_TIMEOUT_MS) == Probe.OPEN && isAdb(it) }
-                ?.let { found.set(it) }
+            fixedWatch.interrupt()
         }
         val port = found.get().takeIf { it != NONE }
         Log.i(
             TAG,
-            "port scan: ${port ?: "nothing"} after $scanMs ms, ${unsure.size} without an answer, " +
+            "port scan: ${port ?: "nothing"} after $scanMs ms, ${unsure.size} without an answer" +
+                "${unansweredRuns(unsure.sorted())}, " +
                 "${System.currentTimeMillis() - started - scanMs} ms on a second look"
         )
         lastFound = port ?: NONE
         return port
+    }
+
+    /**
+     * Where the unanswered ports lie, for the log: whole blocks point at a firewall dropping
+     * them, ports scattered one by one at the scan outrunning the phone.
+     */
+    internal fun unansweredRuns(sorted: List<Int>): String {
+        if (sorted.isEmpty()) return ""
+        var runs = 1
+        var longestStart = sorted.first()
+        var longestLength = 1
+        var runStart = sorted.first()
+        for (i in 1 until sorted.size) {
+            if (sorted[i] != sorted[i - 1] + 1) {
+                runs++
+                runStart = sorted[i]
+            }
+            val length = sorted[i] - runStart + 1
+            if (length > longestLength) {
+                longestLength = length
+                longestStart = runStart
+            }
+        }
+        return " (${sorted.first()}–${sorted.last()} in $runs runs, longest " +
+            "$longestStart–${longestStart + longestLength - 1})"
     }
 
     private enum class Probe { OPEN, CLOSED, UNSURE }
