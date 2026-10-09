@@ -43,7 +43,7 @@ adbd's older TCP mode (`adb tcpip 5555`) does not care about the network, and th
 permanent (`persist.adb.tcp.port` is refused). There is no way to fake Wi-Fi without root.
 
 So `server/adb-tcpip-rearm.sh` runs every minute (a systemd timer, installed as
-`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555, 5556 or 5558 and the phone behind it
+`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555, 5556, 5558 or 5559 and the phone behind it
 is not in TCP mode, it runs `adb tcpip 5555`. The app sees adbd move and re-points its forward.
 
 **USB debugging must be on as well**, cable or not. When the Wi-Fi goes, Android turns Wireless
@@ -52,9 +52,14 @@ though `service.adb.tcp.port` still reads 5555. The app switches USB debugging o
 (`adb_enabled`, same WRITE_SECURE_SETTINGS grant) and moves its forward to 5555 as soon as TCP mode
 answers; the server script checks whether 5555 answers rather than trusting that property.
 
-In practice: after a reboot the phone has to be on some Wi-Fi once — any network, a hotspot
-without internet will do — until the notification says *Up … phone :5555*. From then until the
-next reboot, mobile data is enough; moving between networks reconnects within about a minute.
+In practice: after a reboot the phone has to be on a Wi-Fi once whose access point Android already
+allows for Wireless debugging — the app leaves Wireless debugging off anywhere else, so that
+nobody is asked "Debugging über WLAN in diesem Netzwerk zulassen?" out of the blue — until the
+notification says *Up … phone :5555*. Android keeps that list per access point (BSSID, so a
+router's 2.4 GHz and 5 GHz radios and each extender count separately) and the app cannot read it;
+the same server script reads it over the tunnel (`dumpsys adb`) and sends it to the app, so the
+two agree. A new access point is allowed once by hand: *Ask for this Wi-Fi* in the notification.
+From then until the next reboot, mobile data is enough; moving between networks reconnects within about a minute.
 
 ```
 sudo install -m 755 server/adb-tcpip-rearm.sh /usr/local/bin/adb-tcpip-rearm

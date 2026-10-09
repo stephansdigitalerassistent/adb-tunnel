@@ -59,5 +59,16 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- The server sends Android's list of allowed access points over adb. DUMP is held by the
+             shell and by no ordinary app, so nothing on the phone can plant an access point here. -->
+        <receiver
+            android:name=".TrustSyncReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="ch.heuscher.adbtunnel.SYNC_ALLOWED_WIFI" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

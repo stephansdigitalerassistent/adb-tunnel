@@ -7,7 +7,9 @@ import android.content.Context
  *
  * Android asks "Debugging über WLAN in diesem Netzwerk zulassen?" once per access point (BSSID).
  * Once allowed, Android remembers it; we mirror that set so [TunnelService] only switches
- * Wireless debugging on when it knows Android will not prompt.
+ * Wireless debugging on when it knows Android will not prompt. The mirror is filled two ways: by
+ * watching Wireless debugging stay on, and by the server sending Android's own list, see
+ * [TrustSyncReceiver].
  */
 class AllowedWifi(private val context: Context) {
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -39,7 +41,19 @@ class AllowedWifi(private val context: Context) {
         prefs.edit().putStringSet(KEY_BSSIDS, updated).apply()
     }
 
+    /** The whole allowed set. */
+    fun all(): Set<String> = prefs.getStringSet(KEY_BSSIDS, null)?.toSet() ?: emptySet()
+
+    /** Makes the set exactly [bssids], dropping anything that is not a MAC address. True if it changed. */
+    fun replaceAll(bssids: Collection<String>): Boolean {
+        val updated = bssids.mapNotNull { clean(it) }.filter { MAC.matches(it) }.toSet()
+        if (updated == all()) return false
+        prefs.edit().putStringSet(KEY_BSSIDS, updated).apply()
+        return true
+    }
+
     companion object {
+        private val MAC = Regex("([0-9a-f]{2}:){5}[0-9a-f]{2}")
         private const val PREFS = "allowed_wifi"
         private const val KEY_BSSIDS = "bssids"
         private const val UNKNOWN_MAC = "02:00:00:00:00:00"
