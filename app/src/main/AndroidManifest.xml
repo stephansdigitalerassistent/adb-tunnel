@@ -51,6 +51,21 @@
                 android:value="Holds an SSH tunnel the user started by hand, for wireless adb" />
         </service>
 
+        <!-- Answers Android's Wireless debugging question for access points allowed before; the
+             tunnel switches it on itself. See AllowDialogService. -->
+        <service
+            android:name=".AllowDialogService"
+            android:exported="true"
+            android:label="adb tunnel: allow known Wi-Fi"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/allow_dialog_service" />
+        </service>
+
         <receiver
             android:name=".RestartReceiver"
             android:exported="false">

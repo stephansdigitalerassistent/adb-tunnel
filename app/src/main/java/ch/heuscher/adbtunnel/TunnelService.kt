@@ -117,6 +117,7 @@ class TunnelService : Service() {
             .getInt(Config.KEY_REMOTE_PORT, Config.DEFAULT_REMOTE_PORT)
         try {
             while (!Thread.currentThread().isInterrupted) {
+                AllowDialogService.ensureEnabled(this)
                 keepAdbdOn()
                 refreshAskButton()
                 val port = AdbPort.find(this, ::wirelessDebuggingOn)

@@ -19,6 +19,13 @@ it can be answered once — with *Immer in diesem Netzwerk zulassen* ticked — 
 the phone, instead of surprising its owner later. Android remembers the access point, not the Wi-Fi
 name: with a router plus an extender, press it once near each.
 
+Some phones ask again although the access point was allowed: a Galaxy S10+ on Android 12 cannot
+read its own list after a restart and asks every time. For that the app has a small accessibility
+service that presses *Allow* on exactly this question, and only when the access point named in it
+is one the app remembers as allowed — a new access point stays a person's decision. The app
+switches the service on by itself (same WRITE_SECURE_SETTINGS grant); it shows under
+Settings → Accessibility → Installed apps as *adb tunnel: allow known Wi-Fi*.
+
 ## The server side
 
 The phone logs in as `adbtunnel`, an account that can only listen on its own loopback port:

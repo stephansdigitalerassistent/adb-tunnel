@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="allow_dialog_description">Presses Allow when Android asks again whether to allow Wireless debugging on a Wi-Fi access point that was allowed on this phone before. It reads and presses nothing else.</string>
+</resources>
