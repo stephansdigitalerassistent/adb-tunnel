@@ -30,7 +30,7 @@ Settings → Accessibility → Installed apps as *adb tunnel: allow known Wi-Fi*
 
 The phone logs in as `adbtunnel`, an account that can only listen on its own loopback port:
 `/sbin/nologin` shell, and a `Match User adbtunnel` block in `/etc/ssh/sshd_config` with
-`AllowTcpForwarding remote`, `PermitListen 127.0.0.1:5555 127.0.0.1:5556 127.0.0.1:5557 127.0.0.1:5558`, `PermitTTY no` and
+`AllowTcpForwarding remote`, `PermitListen 127.0.0.1:5555 127.0.0.1:5556 127.0.0.1:5557 127.0.0.1:5558 127.0.0.1:5559`, `PermitTTY no` and
 `ForceCommand /sbin/nologin`. Each phone's key is further pinned to one port:
 
 ```
