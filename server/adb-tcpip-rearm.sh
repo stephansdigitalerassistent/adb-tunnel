@@ -38,7 +38,7 @@ sync_allowed_wifi() {
     rm -f "$dump"
 }
 
-for port in 5555 5556 5558 5559; do
+for port in 5555 5556 5557 5558 5559; do
     serial=127.0.0.1:$port
     # Only tunnels the app holds: it follows adbd to its new port, while a hand-made tunnel to a
     # Wireless debugging port (Termux, pairing) would be cut off by the restart.
