@@ -8,33 +8,36 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 
 /**
- * This phone's login key: made on first use, kept in app-private storage, never exported.
+ * This phone's login key: made on first use, kept in app-private storage ([Storage]), never exported.
  *
  * ECDSA P-256 rather than Ed25519 because Android's own crypto provider does P-256 on every
  * version this app supports, so JSch needs no bundled crypto library to use it.
  */
 object Keys {
-    private const val PRIVATE = "id_ecdsa"
-    private const val PUBLIC = "id_ecdsa.pub"
+    const val PRIVATE = "id_ecdsa"
+    const val PUBLIC = "id_ecdsa.pub"
 
     fun privateKey(context: Context): ByteArray {
         ensure(context)
-        return File(context.filesDir, PRIVATE).readBytes()
+        return File(Storage.of(context).filesDir, PRIVATE).readBytes()
     }
 
     fun publicKey(context: Context): String {
         ensure(context)
-        return File(context.filesDir, PUBLIC).readText().trim()
+        return File(Storage.of(context).filesDir, PUBLIC).readText().trim()
     }
 
     /** Whether a key was ever made, without making one. */
-    fun exists(context: Context): Boolean = File(context.filesDir, PRIVATE).exists()
+    fun exists(context: Context): Boolean = File(Storage.of(context).filesDir, PRIVATE).exists()
 
     @Synchronized
     private fun ensure(context: Context) {
-        val privateFile = File(context.filesDir, PRIVATE)
-        val publicFile = File(context.filesDir, PUBLIC)
+        val privateFile = File(Storage.of(context).filesDir, PRIVATE)
+        val publicFile = File(Storage.of(context).filesDir, PUBLIC)
         if (privateFile.exists() && publicFile.exists()) return
+        // Before the first unlock a key from an older version cannot be seen yet: making a new one
+        // now would replace the one the server knows.
+        check(Storage.unlocked(context)) { "no login key before the first unlock" }
         val pair = KeyPair.genKeyPair(JSch(), KeyPair.ECDSA, 256)
         try {
             val privateBytes = ByteArrayOutputStream().also { pair.writePrivateKey(it) }.toByteArray()

@@ -12,7 +12,7 @@ import android.content.Context
  * [TrustSyncReceiver].
  */
 class AllowedWifi(private val context: Context) {
-    private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val prefs = Storage.of(context).getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     /** Whether [bssid] is in the allowed set. Unknown BSSIDs are never allowed. */
     fun contains(bssid: String?): Boolean {
@@ -54,7 +54,7 @@ class AllowedWifi(private val context: Context) {
 
     companion object {
         private val MAC = Regex("([0-9a-f]{2}:){5}[0-9a-f]{2}")
-        private const val PREFS = "allowed_wifi"
+        const val PREFS = "allowed_wifi"
         private const val KEY_BSSIDS = "bssids"
         private const val UNKNOWN_MAC = "02:00:00:00:00:00"
 

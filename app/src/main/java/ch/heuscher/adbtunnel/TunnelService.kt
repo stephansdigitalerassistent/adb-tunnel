@@ -34,7 +34,7 @@ import kotlin.concurrent.withLock
  *
  * Runs from pressing the icon until pressing Stop, and in between it keeps coming back: START_STICKY
  * has Android restart it after killing it or after a crash, and [RestartReceiver] starts it again
- * after a phone restart or an app update. Only Stop ends that ([wanted]). While it runs it keeps
+ * after a phone restart (before it is unlocked, see [Storage]) or an app update. Only Stop ends that ([wanted]). While it runs it keeps
  * the tunnel up: a dropped connection is retried, a move between Wi-Fi and mobile data reconnects
  * at once, and when adbd comes back on a different port the forward is moved to it.
  *
@@ -113,7 +113,7 @@ class TunnelService : Service() {
     }
 
     private fun keepTunnelUp() {
-        val remotePort = getSharedPreferences(Config.PREFS, MODE_PRIVATE)
+        val remotePort = Storage.of(this).getSharedPreferences(Config.PREFS, MODE_PRIVATE)
             .getInt(Config.KEY_REMOTE_PORT, Config.DEFAULT_REMOTE_PORT)
         try {
             while (!Thread.currentThread().isInterrupted) {
@@ -575,14 +575,14 @@ class TunnelService : Service() {
          * brings this in also brings the running tunnel back.
          */
         fun wanted(context: Context): Boolean {
-            val prefs = context.getSharedPreferences(Config.PREFS, Context.MODE_PRIVATE)
+            val prefs = Storage.of(context).getSharedPreferences(Config.PREFS, Context.MODE_PRIVATE)
             return if (prefs.contains(Config.KEY_WANTED)) prefs.getBoolean(Config.KEY_WANTED, false)
             else Keys.exists(context)
         }
 
         fun setWanted(context: Context, wanted: Boolean) {
             // commit, not apply: after Stop the process may be gone before an apply is written.
-            context.getSharedPreferences(Config.PREFS, Context.MODE_PRIVATE).edit()
+            Storage.of(context).getSharedPreferences(Config.PREFS, Context.MODE_PRIVATE).edit()
                 .putBoolean(Config.KEY_WANTED, wanted).commit()
         }
 

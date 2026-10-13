@@ -10,7 +10,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- So a tunnel that was running comes back after a restart. See RestartReceiver. -->
+    <!-- So a tunnel that was running comes back after a restart, before the phone is unlocked:
+         the components below are directBootAware for that. See RestartReceiver and Storage. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Only to switch Wireless debugging on. Not grantable by a user; granted once over adb:
          adb shell pm grant ch.heuscher.adbtunnel android.permission.WRITE_SECURE_SETTINGS -->
@@ -44,6 +45,7 @@
 
         <service
             android:name=".TunnelService"
+            android:directBootAware="true"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
@@ -55,6 +57,7 @@
              tunnel switches it on itself. See AllowDialogService. -->
         <service
             android:name=".AllowDialogService"
+            android:directBootAware="true"
             android:exported="true"
             android:label="adb tunnel: allow known Wi-Fi"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
@@ -68,8 +71,10 @@
 
         <receiver
             android:name=".RestartReceiver"
+            android:directBootAware="true"
             android:exported="false">
             <intent-filter>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
@@ -79,6 +84,7 @@
              shell and by no ordinary app, so nothing on the phone can plant an access point here. -->
         <receiver
             android:name=".TrustSyncReceiver"
+            android:directBootAware="true"
             android:exported="true"
             android:permission="android.permission.DUMP">
             <intent-filter>

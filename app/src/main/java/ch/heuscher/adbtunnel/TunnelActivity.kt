@@ -22,7 +22,7 @@ class TunnelActivity : Activity() {
         super.onCreate(savedInstanceState)
         val requestedPort = intent.getIntExtra(Config.EXTRA_REMOTE_PORT, 0)
         if (requestedPort in 1..65535) {
-            getSharedPreferences(Config.PREFS, MODE_PRIVATE).edit()
+            Storage.of(this).getSharedPreferences(Config.PREFS, MODE_PRIVATE).edit()
                 .putInt(Config.KEY_REMOTE_PORT, requestedPort).apply()
         }
         // Public, so logging it is harmless — and it is how the key reaches the server's list.

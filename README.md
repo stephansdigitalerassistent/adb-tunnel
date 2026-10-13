@@ -7,7 +7,11 @@ tunnel — server `127.0.0.1:5555` → phone adbd — in a foreground service wi
 Pressing it again only reports the status.
 
 Once started it stays on until Stop is pressed: it comes back by itself after the phone restarts
-(once unlocked), after an app update, and after Android kills it or it crashes. After Stop it stays
+— before anyone unlocks it, so a phone that restarts for a system update at night is reachable
+again without its owner — after an app update, and after Android kills it or it crashes. For that
+the login key lives in device-protected storage: the phone's PIN no longer guards it, only the
+phone itself. (Versions up to 1.0.35 kept it behind the PIN; it is moved the first time the new version runs
+unlocked, which installing the update over adb already is.) After Stop it stays
 off — through restarts too — until the icon is pressed again. After a restart adbd still needs Wi-Fi
 once (see below); the tunnel waits for it and says so.
 
