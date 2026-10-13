@@ -20,6 +20,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import com.jcraft.jsch.JSch
@@ -53,6 +54,9 @@ class TunnelService : Service() {
     private val networkChanged = napLock.newCondition()
     private val allowedWifi by lazy { AllowedWifi(this) }
     private var fallbackAttemptedNetwork: Network? = null
+    private var fallbackAttemptedAt = 0L
+    private var wirelessWorkedNetwork: Network? = null
+    private var wirelessWorkedAt = 0L
     private var lastWifiDecision: String? = null
     @Volatile private var verifyingBssid: String? = null
     @Volatile private var askShown = false
@@ -106,6 +110,7 @@ class TunnelService : Service() {
         session?.let { Thread { it.disconnect() }.start() }
         releaseLocks()
         fallbackAttemptedNetwork = null
+        wirelessWorkedNetwork = null
         lastWifiDecision = null
         verifyingBssid = null
         Log.i(TAG, "stopped")
@@ -125,6 +130,7 @@ class TunnelService : Service() {
                     waitForAdb()
                     continue
                 }
+                noteWirelessWorked(port)
                 update("Connecting to the server…")
                 val connected = try {
                     connect()
@@ -161,6 +167,7 @@ class TunnelService : Service() {
                             connected.setPortForwardingR(AdbPort.LOOPBACK, remotePort, AdbPort.LOOPBACK, next)
                             current = next
                         }
+                        noteWirelessWorked(current)
                         update(upText(remotePort, current), isUp = true)
                     }
                     update("Connection lost, reconnecting")
@@ -335,6 +342,26 @@ class TunnelService : Service() {
         }, "verify-wifi").start()
     }
 
+    /**
+     * adb answered on a Wireless debugging port, so Android allows the access point the phone is on,
+     * whatever its BSSID is. Remembered for the fallback in [keepAdbdOn].
+     */
+    private fun noteWirelessWorked(port: Int) {
+        if (port == TCP_MODE_PORT || !wirelessDebuggingOn()) return
+        wirelessWorkedNetwork = currentWifiNetwork() ?: return
+        wirelessWorkedAt = SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * Wireless debugging worked on this Wi-Fi connection a moment ago, and the last try is not too
+     * recent: the phone is most likely still at the same access point, so one more try is safe.
+     */
+    private fun workedLately(wifiNetwork: Network): Boolean {
+        if (wirelessWorkedNetwork != wifiNetwork) return false
+        val now = SystemClock.elapsedRealtime()
+        return now - wirelessWorkedAt < FALLBACK_WORKED_MS && now - fallbackAttemptedAt >= FALLBACK_RETRY_MS
+    }
+
     private fun verifyFallback() {
         Thread({
             try {
@@ -394,15 +421,22 @@ class TunnelService : Service() {
                 }
             } else if (!canReadLocation()) {
                 // Fallback when BSSID cannot be read at all (permission missing or location off):
-                // try once per Wi-Fi connection (per Network object).
+                // try once per Wi-Fi connection (per Network object), and again when Android
+                // switched it off although adb answered here within the last minutes — a phone
+                // that just restarted flips between Wi-Fi and mobile data and loses it that way.
                 if (wifiEnabled) {
                     fallbackAttemptedNetwork = wifiNetwork
                     logWifiDecision("fallback_on:$wifiNetwork", "Wireless debugging is on for network $wifiNetwork (BSSID unavailable)")
                 } else if (fallbackAttemptedNetwork != wifiNetwork) {
                     fallbackAttemptedNetwork = wifiNetwork
+                    fallbackAttemptedAt = SystemClock.elapsedRealtime()
                     Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
                     logWifiDecision("fallback_try:$wifiNetwork", "BSSID unknown; trying Wireless debugging once for network $wifiNetwork")
                     verifyFallback()
+                } else if (workedLately(wifiNetwork)) {
+                    fallbackAttemptedAt = SystemClock.elapsedRealtime()
+                    Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
+                    logWifiDecision("fallback_retry:$wifiNetwork", "BSSID unknown, but Wireless debugging worked on network $wifiNetwork a moment ago; switched it on again")
                 } else {
                     logWifiDecision("fallback_skip:$wifiNetwork", "BSSID unknown and Wireless debugging was reset to 0; leaving off on network $wifiNetwork")
                 }
@@ -593,5 +627,8 @@ class TunnelService : Service() {
         private const val ADB_WIFI_ENABLED = "adb_wifi_enabled"
         /** The port the server's `adb tcpip` puts adbd on. */
         private const val TCP_MODE_PORT = 5555
+        /** How long after adb last answered over Wireless debugging the fallback still retries. */
+        private const val FALLBACK_WORKED_MS = 10 * 60_000L
+        private const val FALLBACK_RETRY_MS = 30_000L
     }
 }
