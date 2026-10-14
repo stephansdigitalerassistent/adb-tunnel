@@ -42,6 +42,9 @@ import kotlin.concurrent.withLock
  * The tunnel itself needs no Wi-Fi. adbd does, unless it is in TCP mode (`adb tcpip 5555`), which
  * the server switches on through the first tunnel after each reboot — see server/ in this repo —
  * and unless USB debugging is on: with USB and Wireless debugging both off, Android stops adbd.
+ *
+ * Android 10 has no Wireless debugging ([WIRELESS_DEBUGGING]): there only TCP mode is looked for,
+ * and after every restart someone has to switch it on again over USB.
  */
 class TunnelService : Service() {
 
@@ -122,7 +125,8 @@ class TunnelService : Service() {
             .getInt(Config.KEY_REMOTE_PORT, Config.DEFAULT_REMOTE_PORT)
         try {
             while (!Thread.currentThread().isInterrupted) {
-                AllowDialogService.ensureEnabled(this)
+                // Without Wireless debugging Android never asks, so there is nothing to answer.
+                if (WIRELESS_DEBUGGING) AllowDialogService.ensureEnabled(this)
                 keepAdbdOn()
                 refreshAskButton()
                 val port = AdbPort.find(this, ::wirelessDebuggingOn)
@@ -190,10 +194,13 @@ class TunnelService : Service() {
 
     private fun upText(remotePort: Int, phonePort: Int) = "Up: server :$remotePort → phone :$phonePort"
 
-    /** Probing every loopback port is not free, so without Wi-Fi it is retried only now and then. */
+    /**
+     * Probing every loopback port is not free, so without Wi-Fi it is retried only now and then.
+     * Without Wireless debugging only 5555 is tried, which costs nothing.
+     */
     private fun waitForAdb() {
         update(adbMissingText())
-        nap(if (onWifi()) 5_000 else 30_000)
+        nap(if (onWifi() || !WIRELESS_DEBUGGING) 5_000 else 30_000)
     }
 
     /**
@@ -202,13 +209,14 @@ class TunnelService : Service() {
      * with every restart, so there this is what a restart without a USB cable ends in.
      */
     private fun adbMissingText() = when {
+        !WIRELESS_DEBUGGING -> "adb is not on port 5555: connect USB and run adb tcpip 5555"
         !onWifi() -> "adb is off since the phone restarted: join any Wi-Fi once"
         !wirelessDebuggingOn() && wantAskButton() -> "Not allowed on this Wi-Fi: press Ask for this Wi-Fi"
         else -> "Waiting for Wireless debugging"
     }
 
     private fun wirelessDebuggingOn(): Boolean =
-        Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1
+        WIRELESS_DEBUGGING && Settings.Global.getInt(contentResolver, ADB_WIFI_ENABLED, 0) == 1
 
     private fun connect(): Session {
         val jsch = JSch()
@@ -394,6 +402,7 @@ class TunnelService : Service() {
                 Settings.Global.putInt(contentResolver, Settings.Global.ADB_ENABLED, 1)
                 Log.i(TAG, "switched USB debugging on")
             }
+            if (!WIRELESS_DEBUGGING) return
             val wifiNetwork = currentWifiNetwork()
             if (wifiNetwork == null) {
                 fallbackAttemptedNetwork = null
@@ -527,7 +536,7 @@ class TunnelService : Service() {
         }
     }
 
-    private fun wantAskButton(): Boolean = onWifi() && !allowedWifi.contains(currentBssid())
+    private fun wantAskButton(): Boolean = WIRELESS_DEBUGGING && onWifi() &&!allowedWifi.contains(currentBssid())
 
     private fun goForeground() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
@@ -625,6 +634,12 @@ class TunnelService : Service() {
         private const val CHANNEL = "tunnel"
         private const val NOTIFICATION_ID = 1
         private const val ADB_WIFI_ENABLED = "adb_wifi_enabled"
+        /**
+         * Wireless debugging came with Android 11. Android 10 (Huawei's EMUI 12) has only TCP mode,
+         * which a restart switches off and nothing but USB switches on again: the server's re-arm
+         * needs a working adb to send `adb tcpip`, and without Wireless debugging there is none.
+         */
+        private val WIRELESS_DEBUGGING = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
         /** The port the server's `adb tcpip` puts adbd on. */
         private const val TCP_MODE_PORT = 5555
         /** How long after adb last answered over Wireless debugging the fallback still retries. */

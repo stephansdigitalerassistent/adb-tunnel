@@ -34,7 +34,7 @@ Settings → Accessibility → Installed apps as *adb tunnel: allow known Wi-Fi*
 
 The phone logs in as `adbtunnel`, an account that can only listen on its own loopback port:
 `/sbin/nologin` shell, and a `Match User adbtunnel` block in `/etc/ssh/sshd_config` with
-`AllowTcpForwarding remote`, `PermitListen 127.0.0.1:5555 127.0.0.1:5556 127.0.0.1:5557 127.0.0.1:5558 127.0.0.1:5559`, `PermitTTY no` and
+`AllowTcpForwarding remote`, `PermitListen 127.0.0.1:5555 127.0.0.1:5556 127.0.0.1:5557 127.0.0.1:5558 127.0.0.1:5559 127.0.0.1:5560`, `PermitTTY no` and
 `ForceCommand /sbin/nologin`. Each phone's key is further pinned to one port:
 
 ```
@@ -54,7 +54,7 @@ adbd's older TCP mode (`adb tcpip 5555`) does not care about the network, and th
 permanent (`persist.adb.tcp.port` is refused). There is no way to fake Wi-Fi without root.
 
 So `server/adb-tcpip-rearm.sh` runs every minute (a systemd timer, installed as
-`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555, 5556, 5557, 5558 or 5559 and the phone behind it
+`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555 to 5560 and the phone behind it
 is not in TCP mode, it runs `adb tcpip 5555`. The app sees adbd move and re-points its forward.
 
 **USB debugging must be on as well**, cable or not. When the Wi-Fi goes, Android turns Wireless
@@ -78,6 +78,20 @@ sudo install -m 644 server/adb-tcpip-rearm.{service,timer} /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now adb-tcpip-rearm.timer
 ```
 
+## Android 10
+
+Android 10 (Huawei's EMUI 12, for one) has no Wireless debugging, so the app only looks for TCP
+mode on 5555 there: no Wi-Fi allowing, no *Ask for this Wi-Fi*, no accessibility service. TCP mode
+runs on Wi-Fi and mobile data alike, but **every restart switches it off and only USB brings it
+back**: connect a computer and run `adb tcpip 5555`. The server's re-arm cannot help, because it
+needs a working adb to send that, and after a restart there is none. Until then the notification
+says *adb is not on port 5555*. The tunnel itself does come back on its own and picks 5555 up
+within a few seconds of `adb tcpip`.
+
+On setup, the `POST_NOTIFICATIONS` and location grants below do not apply (Android 10 refuses or
+ignores them); `WRITE_SECURE_SETTINGS` still keeps USB debugging on. On Huawei also set Settings →
+Battery → App launch → *adb tunnel* to manual with all three switches on, or EMUI stops it.
+
 ## Setting up a phone
 
 ```
@@ -87,7 +101,7 @@ adb shell pm grant ch.heuscher.adbtunnel android.permission.WRITE_SECURE_SETTING
 adb shell pm grant ch.heuscher.adbtunnel android.permission.POST_NOTIFICATIONS
 adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_FINE_LOCATION
 adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_BACKGROUND_LOCATION
-adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity          # --ei remotePort 5556 on the Fold, 5557 on the Xperia Z1 Compact, 5558 on the S10+
+adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity          # --ei remotePort 5556 on the Fold, 5557 on the Xperia Z1 Compact, 5558 on the S10+, 5559 on the Note Air4 C, 5560 on the Huawei
 adb logcat -d -s AdbTunnel | grep 'public key'                        # → the server's authorized_keys
 ```
 

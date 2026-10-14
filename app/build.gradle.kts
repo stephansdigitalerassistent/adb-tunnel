@@ -26,8 +26,9 @@ android {
 
     defaultConfig {
         applicationId = "ch.heuscher.adbtunnel"
-        // Wireless debugging, which this app exists to reach, is Android 11.
-        minSdk = 30
+        // Android 10 has no Wireless debugging: there the tunnel reaches only TCP mode (5555), which
+        // has to be switched on over USB after every restart. See WIRELESS_DEBUGGING.
+        minSdk = 29
         targetSdk = 36
         versionCode = appVersionCode
         versionName = "1.0.$appVersionCode"
