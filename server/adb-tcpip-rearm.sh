@@ -56,10 +56,12 @@ for port in 5555 5556 5557 5558 5559 5560; do
     # Ask the port, not service.adb.tcp.port: that property stays 5555 after adbd has been stopped
     # and started again without its TCP listener. Only a clean answer counts: a failed query must
     # not restart adbd under someone's test run.
-    # Plain nc with no input, not `nc -z`: Android 12's toybox (0.8.4) has no -z, and the failure
-    # would read as closed and restart adbd every minute.
-    out=$(timeout 15 adb -s "$serial" shell 'nc -w 2 127.0.0.1 5555 </dev/null >/dev/null 2>&1 && echo open || echo closed') || continue
-    case "$out" in *open*) continue ;; *closed*) ;; *) continue ;; esac
+    # The kernel's socket tables, not nc: Android 12's toybox has no `nc -z` and the Huawei's
+    # Android 10 none at all, and either failure read as closed and restarted adbd every minute.
+    # 15B3 is 5555, 0A is LISTEN; a table without its header line was not read and proves nothing.
+    tables=$(timeout 15 adb -s "$serial" shell cat /proc/net/tcp /proc/net/tcp6 2>/dev/null)
+    printf '%s\n' "$tables" | grep -q local_address || continue
+    printf '%s\n' "$tables" | awk '$2 ~ /:15B3$/ && $4 == "0A" { found = 1 } END { exit !found }' && continue
     echo "$serial: adbd not listening on 5555, switching to TCP mode"
     timeout 15 adb -s "$serial" tcpip 5555
 done
