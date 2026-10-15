@@ -26,7 +26,15 @@ import android.provider.Settings
 import android.util.Log
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
+import com.jcraft.jsch.SocketFactory
 import java.io.ByteArrayInputStream
+import java.io.FilterInputStream
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -51,6 +59,7 @@ import kotlin.concurrent.withLock
  * locks are let go ([letSleep]). Asleep, the phone's timers stand still, so an alarm ([ACTION_CHECK])
  * wakes it at least every [CHECK_ALARM_MS] for a check that pings the server: after a failover or a
  * server reboot only the phone's own packet brings back the reset that ends the dead session.
+ * A session the server closes wakes the loop at once ([WatchedSockets]).
  * Each check takes a short timed wake lock. A lock held all the time had Huawei's PowerGenie book
  * the app as a "wakelock high power app", the likely road to the force-stop that left the P20's
  * tunnel down for four hours on 2026-10-15.
@@ -72,6 +81,8 @@ class TunnelService : Service() {
     private var lastWifiDecision: String? = null
     @Volatile private var verifyingBssid: String? = null
     @Volatile private var askShown = false
+    /** Between [letSleep] and [holdAwake]: the tunnel is up and the locks are let go. */
+    @Volatile private var sleepAllowed = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -87,8 +98,7 @@ class TunnelService : Service() {
             return START_STICKY
         }
         if (intent?.action == ACTION_CHECK && worker?.isAlive == true) {
-            wakeLock?.acquire(CHECK_AWAKE_MS)
-            napLock.withLock { networkChanged.signalAll() }
+            wakeForCheck()
             return START_STICKY
         }
         // No intent: Android restarting it after killing the process. Stop wins over that, and
@@ -167,8 +177,8 @@ class TunnelService : Service() {
                     while (connected.isConnected) {
                         letSleep()
                         nap(15_000)
-                        // Woken by the timer, a network change or the check alarm.
-                        wakeLock?.acquire(CHECK_AWAKE_MS)
+                        // Woken by the timer, a network change, the check alarm or the session ending.
+                        keepAwakeForCheck()
                         // A server that lost the session answers with a reset; give it a moment.
                         connected.sendKeepAliveMsg()
                         nap(2_000)
@@ -256,9 +266,10 @@ class TunnelService : Service() {
         s.setConfig("cipher.s2c", "aes128-gcm@openssh.com,aes128-ctr")
         s.setConfig("mac.c2s", "hmac-sha2-256-etm@openssh.com,hmac-sha2-256")
         s.setConfig("mac.s2c", "hmac-sha2-256-etm@openssh.com,hmac-sha2-256")
+        s.setSocketFactory(WatchedSockets())
         s.setServerAliveInterval(30_000)
         s.setServerAliveCountMax(3)
-        s.connect(15_000)
+        s.connect(CONNECT_TIMEOUT_MS)
         return s
     }
 
@@ -621,6 +632,50 @@ class TunnelService : Service() {
             .apply { setReferenceCounted(false); acquire() }
     }
 
+    /**
+     * Sockets for the SSH session that wake the loop when the server ends it. With the phone asleep
+     * the loop's timer stands still, so without this a closed session stayed unnoticed until the
+     * next check alarm, up to a quarter of an hour.
+     */
+    private inner class WatchedSockets : SocketFactory {
+        override fun createSocket(host: String, port: Int): Socket =
+            Socket().apply { connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS) }
+
+        override fun getInputStream(socket: Socket): InputStream =
+            object : FilterInputStream(socket.getInputStream()) {
+                override fun read(): Int = watched { super.read() }
+                override fun read(b: ByteArray, off: Int, len: Int): Int = watched { super.read(b, off, len) }
+            }
+
+        override fun getOutputStream(socket: Socket): OutputStream = socket.getOutputStream()
+
+        private fun watched(read: () -> Int): Int =
+            try {
+                read().also { if (it < 0) sessionEnded() }
+            } catch (e: SocketTimeoutException) {
+                throw e // JSch's cue for a keep-alive, not an end
+            } catch (e: IOException) {
+                sessionEnded()
+                throw e
+            }
+
+        /** Only an up tunnel's loop waits for it; while building, waking would skip the back-off. */
+        private fun sessionEnded() {
+            if (sleepAllowed) wakeForCheck()
+        }
+    }
+
+    /** Wakes the loop for a check now, from the check alarm or a session that ended. */
+    private fun wakeForCheck() {
+        keepAwakeForCheck()
+        napLock.withLock { networkChanged.signalAll() }
+    }
+
+    /** A short timed lock for one check; never shortens the untimed one [holdAwake] took. */
+    private fun keepAwakeForCheck() {
+        wakeLock?.takeIf { !it.isHeld }?.acquire(CHECK_AWAKE_MS)
+    }
+
     private val checkAlarm: PendingIntent by lazy {
         PendingIntent.getService(
             this, 2, Intent(this, TunnelService::class.java).setAction(ACTION_CHECK), PendingIntent.FLAG_IMMUTABLE
@@ -629,6 +684,7 @@ class TunnelService : Service() {
 
     /** Building the tunnel: retries and back-offs must not stall in deep sleep. */
     private fun holdAwake() {
+        sleepAllowed = false
         getSystemService(AlarmManager::class.java).cancel(checkAlarm)
         wakeLock?.acquire()
         wifiLock?.acquire()
@@ -644,9 +700,11 @@ class TunnelService : Service() {
         )
         wakeLock?.takeIf { it.isHeld }?.release()
         wifiLock?.takeIf { it.isHeld }?.release()
+        sleepAllowed = true
     }
 
     private fun releaseLocks() {
+        sleepAllowed = false
         wakeLock?.takeIf { it.isHeld }?.release()
         wifiLock?.takeIf { it.isHeld }?.release()
         wakeLock = null
@@ -696,6 +754,7 @@ class TunnelService : Service() {
         private const val FALLBACK_RETRY_MS = 30_000L
         /** One check of a running tunnel: probe adbd, maybe move the forward. */
         private const val CHECK_AWAKE_MS = 10_000L
+        private const val CONNECT_TIMEOUT_MS = 15_000
         /** Doze lets an idle alarm through at most every 9 minutes. */
         private const val CHECK_ALARM_MS = 10 * 60_000L
     }

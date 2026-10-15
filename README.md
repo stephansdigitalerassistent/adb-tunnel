@@ -42,9 +42,10 @@ restrict,port-forwarding,permitlisten="127.0.0.1:5555" ecdsa-sha2-nistp256 AAAAâ
 ```
 
 The listen address must be given as `127.0.0.1`; `localhost` or no address is refused. The same
-block has `ClientAliveInterval 10` / `ClientAliveCountMax 3`, so a session lost with a network change
-frees the port within about 30 s and the phone's new session can take it. Until then the app logs
-in fine but gets "remote port forwarding failed", and retries every 10 s.
+block has `ClientAliveInterval 60` / `ClientAliveCountMax 3`, so a session lost with a network change
+frees the port within about 3 min and the phone's new session can take it. Until then the app logs
+in fine but gets "remote port forwarding failed", and retries every 10 s. A ping every 10 s would free
+the port sooner, but every ping wakes a sleeping phone: Huawei's PowerGenie flagged the app for it.
 
 ## Without Wi-Fi
 
