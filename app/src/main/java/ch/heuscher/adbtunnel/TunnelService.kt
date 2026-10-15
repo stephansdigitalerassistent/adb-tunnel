@@ -1,6 +1,7 @@
 package ch.heuscher.adbtunnel
 
 import android.Manifest
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -45,6 +46,14 @@ import kotlin.concurrent.withLock
  *
  * Android 10 has no Wireless debugging ([WIRELESS_DEBUGGING]): there only TCP mode is looked for,
  * and after every restart someone has to switch it on again over USB.
+ *
+ * The phone stays awake only while the tunnel is being built ([holdAwake]). Once it is up the
+ * locks are let go ([letSleep]). Asleep, the phone's timers stand still, so an alarm ([ACTION_CHECK])
+ * wakes it at least every [CHECK_ALARM_MS] for a check that pings the server: after a failover or a
+ * server reboot only the phone's own packet brings back the reset that ends the dead session.
+ * Each check takes a short timed wake lock. A lock held all the time had Huawei's PowerGenie book
+ * the app as a "wakelock high power app", the likely road to the force-stop that left the P20's
+ * tunnel down for four hours on 2026-10-15.
  */
 class TunnelService : Service() {
 
@@ -77,8 +86,14 @@ class TunnelService : Service() {
             Thread({ askForThisWifi() }, "ask-wifi").start()
             return START_STICKY
         }
-        // No intent: Android restarting it after killing the process. Stop wins over that.
-        if (intent == null && !wanted(this)) {
+        if (intent?.action == ACTION_CHECK && worker?.isAlive == true) {
+            wakeLock?.acquire(CHECK_AWAKE_MS)
+            napLock.withLock { networkChanged.signalAll() }
+            return START_STICKY
+        }
+        // No intent: Android restarting it after killing the process. Stop wins over that, and
+        // over a check alarm left over from a process that died.
+        if ((intent == null || intent.action == ACTION_CHECK) && !wanted(this)) {
             stopSelf()
             return START_NOT_STICKY
         }
@@ -111,6 +126,7 @@ class TunnelService : Service() {
         worker = null
         // Disconnecting writes to the socket, which the main thread may not do.
         session?.let { Thread { it.disconnect() }.start() }
+        getSystemService(AlarmManager::class.java).cancel(checkAlarm)
         releaseLocks()
         fallbackAttemptedNetwork = null
         wirelessWorkedNetwork = null
@@ -149,7 +165,13 @@ class TunnelService : Service() {
                     var current: Int = port
                     update(upText(remotePort, current), isUp = true)
                     while (connected.isConnected) {
+                        letSleep()
                         nap(15_000)
+                        // Woken by the timer, a network change or the check alarm.
+                        wakeLock?.acquire(CHECK_AWAKE_MS)
+                        // A server that lost the session answers with a reset; give it a moment.
+                        connected.sendKeepAliveMsg()
+                        nap(2_000)
                         refreshAskButton()
                         if (!connected.isConnected) continue
                         // A Wireless debugging port dies with the Wi-Fi, TCP mode does not: move to
@@ -182,6 +204,7 @@ class TunnelService : Service() {
                     // for a session lost on the previous network, until its keep-alive gives up.
                     update("Retrying in 10 s: ${e.message}")
                 } finally {
+                    holdAwake()
                     connected.disconnect()
                     session = null
                 }
@@ -598,6 +621,31 @@ class TunnelService : Service() {
             .apply { setReferenceCounted(false); acquire() }
     }
 
+    private val checkAlarm: PendingIntent by lazy {
+        PendingIntent.getService(
+            this, 2, Intent(this, TunnelService::class.java).setAction(ACTION_CHECK), PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    /** Building the tunnel: retries and back-offs must not stall in deep sleep. */
+    private fun holdAwake() {
+        getSystemService(AlarmManager::class.java).cancel(checkAlarm)
+        wakeLock?.acquire()
+        wifiLock?.acquire()
+    }
+
+    /**
+     * The tunnel is up: the phone may sleep, and Wi-Fi may save power, between checks. Each call
+     * moves the check alarm on, so it only fires when no check ran for [CHECK_ALARM_MS].
+     */
+    private fun letSleep() {
+        getSystemService(AlarmManager::class.java).setAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + CHECK_ALARM_MS, checkAlarm
+        )
+        wakeLock?.takeIf { it.isHeld }?.release()
+        wifiLock?.takeIf { it.isHeld }?.release()
+    }
+
     private fun releaseLocks() {
         wakeLock?.takeIf { it.isHeld }?.release()
         wifiLock?.takeIf { it.isHeld }?.release()
@@ -631,6 +679,7 @@ class TunnelService : Service() {
 
         private const val ACTION_STOP = "ch.heuscher.adbtunnel.STOP"
         private const val ACTION_ASK_WIFI = "ch.heuscher.adbtunnel.ASK_WIFI"
+        private const val ACTION_CHECK = "ch.heuscher.adbtunnel.CHECK"
         private const val CHANNEL = "tunnel"
         private const val NOTIFICATION_ID = 1
         private const val ADB_WIFI_ENABLED = "adb_wifi_enabled"
@@ -645,5 +694,9 @@ class TunnelService : Service() {
         /** How long after adb last answered over Wireless debugging the fallback still retries. */
         private const val FALLBACK_WORKED_MS = 10 * 60_000L
         private const val FALLBACK_RETRY_MS = 30_000L
+        /** One check of a running tunnel: probe adbd, maybe move the forward. */
+        private const val CHECK_AWAKE_MS = 10_000L
+        /** Doze lets an idle alarm through at most every 9 minutes. */
+        private const val CHECK_ALARM_MS = 10 * 60_000L
     }
 }
