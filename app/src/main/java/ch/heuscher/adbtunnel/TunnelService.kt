@@ -107,6 +107,13 @@ class TunnelService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        val starting = worker?.isAlive != true
+        if (starting) {
+            synchronized(this) {
+                status = "Starting…"
+                up = false
+            }
+        }
         try {
             goForeground()
         } catch (e: IllegalStateException) {
@@ -116,8 +123,10 @@ class TunnelService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (worker?.isAlive != true) {
-            running = true
+        if (starting) {
+            synchronized(this) {
+                running = true
+            }
             acquireLocks()
             watchNetwork()
             worker = Thread({ keepTunnelUp() }, "adb-tunnel").also { it.start() }
@@ -127,15 +136,19 @@ class TunnelService : Service() {
     }
 
     override fun onDestroy() {
-        running = false
-        status = "Stopped"
-        up = false
         networkCallback?.let { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
         networkCallback = null
         worker?.interrupt()
         worker = null
         // Disconnecting writes to the socket, which the main thread may not do.
         session?.let { Thread { it.disconnect() }.start() }
+        synchronized(this) {
+            running = false
+            status = "Stopped"
+            up = false
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+        }
         getSystemService(AlarmManager::class.java).cancel(checkAlarm)
         releaseLocks()
         fallbackAttemptedNetwork = null
@@ -549,7 +562,8 @@ class TunnelService : Service() {
     }
 
     /** Anything but an "Up" line counts as down: waiting, connecting, retrying. */
-    private fun update(text: String, isUp: Boolean = false) {
+    private fun update(text: String, isUp: Boolean = false) = synchronized(this) {
+        if (!running) return
         if (text == status && isUp == up) return
         status = text
         up = isUp
@@ -563,7 +577,7 @@ class TunnelService : Service() {
      * unreadable BSSID counts as not allowed. Re-posts the notification when that changes, which
      * also turns the icon orange or back.
      */
-    private fun refreshAskButton() {
+    private fun refreshAskButton() = synchronized(this) {
         if (!running) return
         if (wantAskButton() != askShown) {
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
