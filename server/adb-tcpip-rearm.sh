@@ -11,6 +11,8 @@
 # "Debugging über WLAN in diesem Netzwerk zulassen?", and it cannot read Android's list itself; it
 # can only learn an access point by seeing Wireless debugging on there, which in TCP mode it never
 # is. So the list is read here (`dumpsys adb`) and handed over, see TrustSyncReceiver in the app.
+#
+# And it frees ports held by sessions the phone has already left, see reap_stale_session.
 set -u
 
 cache_dir=${XDG_CACHE_HOME:-$HOME/.cache}/adb-tcpip-rearm
@@ -38,12 +40,34 @@ sync_allowed_wifi() {
     rm -f "$dump"
 }
 
+# A phone that changes networks without saying goodbye leaves its old session holding the port, and
+# ClientAliveInterval does not always end it: with adb on this side still knocking on the port,
+# sshd never sends its probe, and the session lived until TCP gave up, 16 min later (S23 and Fold,
+# 2026-10-18). Each key may listen on its own port only, so a login of that key refused the port
+# means the phone has started over and the holder is its own leftover. Only a holder older than the
+# refusal goes: one that came up since is the phone's new session.
+adbtunnel_uid=$(id -u adbtunnel)
+refusals=$(journalctl --since -3min -o short-unix _COMM=sshd-session _UID="$adbtunnel_uid" 2>/dev/null |
+    sed -n 's/^\([0-9]*\)\..*bind \[127\.0\.0\.1\]:\([0-9]*\): Address already in use$/\1 \2/p')
+
+reap_stale_session() {
+    port=$1 pid=$2
+    refused=$(printf '%s\n' "$refusals" | awk -v port="$port" '$2 == port { t = $1 } END { print t }')
+    [ -n "$refused" ] || return 1
+    age=$(ps -o etimes= -p "$pid" | tr -d ' ')
+    [ -n "$age" ] && [ $(($(date +%s) - age)) -lt "$refused" ] || return 1
+    sudo -n kill "$pid" || return 1
+    echo "127.0.0.1:$port: ended the stale tunnel session $pid (up ${age} s), the phone was refused the port"
+}
+
 for port in 5555 5556 5557 5558 5559 5560 5561; do
     serial=127.0.0.1:$port
     # Only tunnels the app holds: it follows adbd to its new port, while a hand-made tunnel to a
     # Wireless debugging port (Termux, pairing) would be cut off by the restart.
     pid=$(sudo -n ss -Hltnp "sport = :$port" | grep '127\.0\.0\.1:' | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
     [ -n "$pid" ] && [ "$(ps -o user= -p "$pid")" = adbtunnel ] || continue
+    # The phone's new session takes the port on its next try, within 10 s; this run leaves it be.
+    reap_stale_session "$port" "$pid" && continue
     # Disconnect first: after adbd restarts behind the tunnel (the switch to TCP mode below does
     # that) adb can keep the old connection as "offline", and `adb connect` alone then answers
     # "already connected" and leaves it so.

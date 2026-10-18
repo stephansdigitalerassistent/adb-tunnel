@@ -47,6 +47,12 @@ frees the port within about 3 min and the phone's new session can take it. Until
 in fine but gets "remote port forwarding failed", and retries every 10 s. A ping every 10 s would free
 the port sooner, but every ping wakes a sleeping phone: Huawei's PowerGenie flagged the app for it.
 
+Those 3 min are not guaranteed: while adb on the server keeps knocking on the dead port, sshd never
+sends its probe, and such a session has held the port for 16 min, until TCP gave up. So the server
+script below also watches for logins refused their port ("Address already in use" from an
+`adbtunnel` session) and ends the older session holding it. Each key may only listen on its own
+port, so that holder can only be the same phone's leftover. The phone is back within about a minute.
+
 ## Without Wi-Fi
 
 The SSH tunnel runs over any network, but Android's *Wireless debugging* only runs on Wi-Fi.
@@ -55,7 +61,7 @@ adbd's older TCP mode (`adb tcpip 5555`) does not care about the network, and th
 permanent (`persist.adb.tcp.port` is refused). There is no way to fake Wi-Fi without root.
 
 So `server/adb-tcpip-rearm.sh` runs every minute (a systemd timer, installed as
-`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555 to 5560 and the phone behind it
+`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555 to 5561 and the phone behind it
 is not in TCP mode, it runs `adb tcpip 5555`. The app sees adbd move and re-points its forward.
 
 **USB debugging must be on as well**, cable or not. When the Wi-Fi goes, Android turns Wireless
