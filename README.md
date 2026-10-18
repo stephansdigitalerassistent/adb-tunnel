@@ -102,7 +102,7 @@ adb shell pm grant ch.heuscher.adbtunnel android.permission.WRITE_SECURE_SETTING
 adb shell pm grant ch.heuscher.adbtunnel android.permission.POST_NOTIFICATIONS
 adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_FINE_LOCATION
 adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_BACKGROUND_LOCATION
-adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity          # --ei remotePort 5556 on the Fold, 5557 on the Xperia Z1 Compact, 5558 on the S10+, 5559 on the Note Air4 C, 5560 on the Huawei
+adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity          # --ei remotePort 5556 on the Fold, 5557 on the Xperia Z1 Compact, 5558 on the S10+, 5559 on the Note Air4 C, 5560 on the Huawei, 5561 on the Tab S5e
 adb logcat -d -s AdbTunnel | grep 'public key'                        # → the server's authorized_keys
 ```
 
