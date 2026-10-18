@@ -60,7 +60,7 @@ reap_stale_session() {
     echo "127.0.0.1:$port: ended the stale tunnel session $pid (up ${age} s), the phone was refused the port"
 }
 
-for port in 5555 5556 5557 5558 5559 5560 5561 5562; do
+for port in 5555 5556 5557 5558 5559 5560 5561 5562 5563; do
     serial=127.0.0.1:$port
     # Only tunnels the app holds: it follows adbd to its new port, while a hand-made tunnel to a
     # Wireless debugging port (Termux, pairing) would be cut off by the restart.

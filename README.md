@@ -61,7 +61,7 @@ adbd's older TCP mode (`adb tcpip 5555`) does not care about the network, and th
 permanent (`persist.adb.tcp.port` is refused). There is no way to fake Wi-Fi without root.
 
 So `server/adb-tcpip-rearm.sh` runs every minute (a systemd timer, installed as
-`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555 to 5562 and the phone behind it
+`/usr/local/bin/adb-tcpip-rearm`): whenever a tunnel is up on 5555 to 5563 and the phone behind it
 is not in TCP mode, it runs `adb tcpip 5555`. The app sees adbd move and re-points its forward.
 
 **USB debugging must be on as well**, cable or not. When the Wi-Fi goes, Android turns Wireless
@@ -108,7 +108,7 @@ adb shell pm grant ch.heuscher.adbtunnel android.permission.WRITE_SECURE_SETTING
 adb shell pm grant ch.heuscher.adbtunnel android.permission.POST_NOTIFICATIONS
 adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_FINE_LOCATION
 adb shell pm grant ch.heuscher.adbtunnel android.permission.ACCESS_BACKGROUND_LOCATION
-adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity          # --ei remotePort 5556 on the Fold, 5557 on the Xperia Z1 Compact, 5558 on the S10+, 5559 on the Note Air4 C, 5560 on the Huawei, 5561 on the Tab S5e, 5562 on the Pixel 6a
+adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity          # --ei remotePort 5556 on the Fold, 5557 on the Xperia Z1 Compact, 5558 on the S10+, 5559 on the Note Air4 C, 5560 on the Huawei, 5561 on the Tab S5e, 5562 on the Pixel 6a, 5563 on the Tab S6
 adb logcat -d -s AdbTunnel | grep 'public key'                        # → the server's authorized_keys
 ```
 
