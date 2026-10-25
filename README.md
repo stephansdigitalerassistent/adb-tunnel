@@ -31,6 +31,9 @@ switches the service on by itself (same WRITE_SECURE_SETTINGS grant), and only f
 it switches Wireless debugging on; it goes off again after that, once the question is answered, and
 on *Stop*. Banking apps (UBS Access) refuse to start while an unknown accessibility service is on.
 While on it shows under Settings → Accessibility → Installed apps as *adb tunnel: allow known Wi-Fi*.
+The question cannot be answered before the phone's first unlock after a restart, so when Android
+switches Wireless debugging back off then, the access point stays allowed and the tunnel asks again
+once the phone is unlocked.
 
 ## The server side
 

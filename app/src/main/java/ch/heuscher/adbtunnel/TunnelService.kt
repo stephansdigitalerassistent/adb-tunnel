@@ -80,6 +80,8 @@ class TunnelService : Service() {
     private var wirelessWorkedAt = 0L
     private var lastWifiDecision: String? = null
     @Volatile private var verifyingBssid: String? = null
+    /** Android switched Wireless debugging back off here before the first unlock; asked again after it. */
+    @Volatile private var flippedBeforeUnlock: String? = null
     @Volatile private var askShown = false
     /** Between [letSleep] and [holdAwake]: the tunnel is up and the locks are let go. */
     @Volatile private var sleepAllowed = false
@@ -157,6 +159,7 @@ class TunnelService : Service() {
         wirelessWorkedNetwork = null
         lastWifiDecision = null
         verifyingBssid = null
+        flippedBeforeUnlock = null
         Log.i(TAG, "stopped")
         super.onDestroy()
     }
@@ -387,6 +390,11 @@ class TunnelService : Service() {
                     allowedWifi.add(bssid)
                     Log.i(TAG, "learned allowed Wi-Fi: $bssid")
                     refreshAskButton()
+                } else if (!Storage.unlocked(this)) {
+                    // Android asks, but its question cannot be answered before the first unlock
+                    // (S10+, 2026-10-25: only the lock screen to be seen), so it says nothing about the access point.
+                    flippedBeforeUnlock = bssid
+                    Log.i(TAG, "Wireless debugging flipped back to 0 on $bssid before the unlock; asking again after it")
                 } else {
                     allowedWifi.remove(bssid)
                     Log.i(TAG, "Wireless debugging flipped back to 0 on $bssid; not allowed")
@@ -469,7 +477,10 @@ class TunnelService : Service() {
                     // only learned once it stays on here for 5 s.
                     if (!allowedWifi.contains(bssid)) verifyWifi(bssid)
                     logWifiDecision("allowed:$bssid:on", "Wireless debugging is on; Wi-Fi $bssid is allowed")
+                } else if (allowedWifi.contains(bssid) && flippedBeforeUnlock == bssid && !Storage.unlocked(this)) {
+                    logWifiDecision("allowed:$bssid:wait_unlock", "Wi-Fi $bssid is allowed; Android asks again, waiting for the unlock to answer")
                 } else if (allowedWifi.contains(bssid)) {
+                    flippedBeforeUnlock = null
                     AllowDialogService.expectQuestion(this, bssid)
                     Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
                     logWifiDecision("allowed:$bssid:switched_on", "switched Wireless debugging on for allowed Wi-Fi $bssid")
