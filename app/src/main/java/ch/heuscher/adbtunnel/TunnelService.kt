@@ -89,6 +89,8 @@ class TunnelService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             setWanted(this, false)
+            // Stop leaves no accessibility service on, so banking apps start again.
+            AllowDialogService.switchOff(this)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -164,8 +166,8 @@ class TunnelService : Service() {
             .getInt(Config.KEY_REMOTE_PORT, Config.DEFAULT_REMOTE_PORT)
         try {
             while (!Thread.currentThread().isInterrupted) {
-                // Without Wireless debugging Android never asks, so there is nothing to answer.
-                if (WIRELESS_DEBUGGING) AllowDialogService.ensureEnabled(this)
+                // Left on by a process that died within the minute it was needed.
+                if (WIRELESS_DEBUGGING) AllowDialogService.switchOffUnlessExpected(this)
                 keepAdbdOn()
                 refreshAskButton()
                 val port = AdbPort.find(this, ::wirelessDebuggingOn)
@@ -468,7 +470,7 @@ class TunnelService : Service() {
                     if (!allowedWifi.contains(bssid)) verifyWifi(bssid)
                     logWifiDecision("allowed:$bssid:on", "Wireless debugging is on; Wi-Fi $bssid is allowed")
                 } else if (allowedWifi.contains(bssid)) {
-                    AllowDialogService.expectQuestion(bssid)
+                    AllowDialogService.expectQuestion(this, bssid)
                     Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
                     logWifiDecision("allowed:$bssid:switched_on", "switched Wireless debugging on for allowed Wi-Fi $bssid")
                     verifyWifi(bssid)
@@ -486,11 +488,13 @@ class TunnelService : Service() {
                 } else if (fallbackAttemptedNetwork != wifiNetwork) {
                     fallbackAttemptedNetwork = wifiNetwork
                     fallbackAttemptedAt = SystemClock.elapsedRealtime()
+                    AllowDialogService.expectQuestion(this, null)
                     Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
                     logWifiDecision("fallback_try:$wifiNetwork", "BSSID unknown; trying Wireless debugging once for network $wifiNetwork")
                     verifyFallback()
                 } else if (workedLately(wifiNetwork)) {
                     fallbackAttemptedAt = SystemClock.elapsedRealtime()
+                    AllowDialogService.expectQuestion(this, null)
                     Settings.Global.putInt(contentResolver, ADB_WIFI_ENABLED, 1)
                     logWifiDecision("fallback_retry:$wifiNetwork", "BSSID unknown, but Wireless debugging worked on network $wifiNetwork a moment ago; switched it on again")
                 } else {

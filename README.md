@@ -27,8 +27,10 @@ Some phones ask again although the access point was allowed: a Galaxy S10+ on An
 read its own list after a restart and asks every time. For that the app has a small accessibility
 service that presses *Allow* on exactly this question, and only when the access point named in it
 is one the app remembers as allowed — a new access point stays a person's decision. The app
-switches the service on by itself (same WRITE_SECURE_SETTINGS grant); it shows under
-Settings → Accessibility → Installed apps as *adb tunnel: allow known Wi-Fi*.
+switches the service on by itself (same WRITE_SECURE_SETTINGS grant), and only for the minute after
+it switches Wireless debugging on; it goes off again after that, once the question is answered, and
+on *Stop*. Banking apps (UBS Access) refuse to start while an unknown accessibility service is on.
+While on it shows under Settings → Accessibility → Installed apps as *adb tunnel: allow known Wi-Fi*.
 
 ## The server side
 

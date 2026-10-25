@@ -23,6 +23,10 @@ import android.view.accessibility.AccessibilityNodeInfo
  * The tunnel says when it switches Wireless debugging on ([expectQuestion]) and the service then
  * looks for the question for a while: right after a restart the phone is slow, and waiting for
  * Android to report the window was not enough there (S10+, 2026-10-09: reported nothing at all).
+ *
+ * The service is switched on only for that while and off again after it, when the question is
+ * answered, and on Stop ([switchOff]). Banking apps refuse to start while an accessibility service
+ * they do not know is on (UBS Access, 2026-10-25), so it must not stay on for good.
  */
 class AllowDialogService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
@@ -110,6 +114,8 @@ class AllowDialogService : AccessibilityService() {
                     "(${allow.viewIdResourceName}, $pressed)"
             )
             expectedUntil = 0
+            // A moment later, so the press is not cut off by the service going away.
+            switchOffLater(applicationContext, ANSWERED_OFF_MS)
             return true
         }
         lastSeen = "active window ${rootInActiveWindow?.packageName}, ${windows.size} windows, System UI: $seen"
@@ -133,6 +139,7 @@ class AllowDialogService : AccessibilityService() {
         private const val EVENT_LOOKS = 6
         private const val EXPECTED_LOOKS = 60
         private const val EXPECT_MS = 60_000L
+        private const val ANSWERED_OFF_MS = 2_000L
         private const val MAX_NODES = 400
         private val MAC = Regex("([0-9a-f]{2}:){5}[0-9a-f]{2}")
         private const val ENABLED_SERVICES = Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
@@ -146,41 +153,95 @@ class AllowDialogService : AccessibilityService() {
         @Volatile
         private var expectedUntil = 0L
 
+        private val main = Handler(Looper.getMainLooper())
+        @Volatile
+        private var offTask: Runnable? = null
+
         private fun expecting(): String? = expected.takeIf { System.currentTimeMillis() < expectedUntil }
 
         /**
-         * The tunnel is about to switch Wireless debugging on at [bssid], an allowed access point.
-         * Remembered for a minute, because the tunnel drops the access point from its list when
-         * Android switches Wireless debugging back off to ask, which is before the answer.
+         * The tunnel is about to switch Wireless debugging on at [bssid], an allowed access point, or
+         * at an access point it cannot name ([bssid] null: then only an allowed one is answered).
+         * Switches the service on and remembers the access point for a minute, because the tunnel
+         * drops it from its list when Android switches Wireless debugging back off to ask, which is
+         * before the answer. Then the service goes off again.
          */
-        fun expectQuestion(bssid: String) {
-            expected = AllowedWifi.clean(bssid) ?: return
-            expectedUntil = System.currentTimeMillis() + EXPECT_MS
+        fun expectQuestion(context: Context, bssid: String?) {
+            val app = context.applicationContext
+            val clean = bssid?.let { AllowedWifi.clean(it) ?: return }
+            if (!switchOn(app)) return
+            if (clean != null) {
+                expected = clean
+                expectedUntil = System.currentTimeMillis() + EXPECT_MS
+            }
+            // Only once connected; a service connecting later looks by itself (onServiceConnected).
             instance?.let { service -> service.handler.post { service.look(EXPECTED_LOOKS) } }
+            switchOffLater(app, EXPECT_MS)
+        }
+
+        /** Switches the service off unless a question is still expected; the tunnel calls it on every round. */
+        fun switchOffUnlessExpected(context: Context) {
+            if (expecting() == null && offTask == null) switchOff(context)
+        }
+
+        private fun switchOffLater(context: Context, ms: Long) {
+            main.post {
+                offTask?.let { main.removeCallbacks(it) }
+                val task = Runnable {
+                    offTask = null
+                    if (expecting() == null) switchOff(context)
+                }
+                offTask = task
+                main.postDelayed(task, ms)
+            }
         }
 
         /**
-         * Switches this service on. Android offers that only in its settings, to a person; with
-         * WRITE_SECURE_SETTINGS, which the tunnel has anyway, the app can do it itself. Called
-         * again and again, because some phones switch such a service off when its app is updated.
+         * Android offers switching a service on only in its settings, to a person; with
+         * WRITE_SECURE_SETTINGS, which the tunnel has anyway, the app can do it itself.
          */
-        fun ensureEnabled(context: Context) {
+        private fun switchOn(context: Context): Boolean {
             val me = ComponentName(context, AllowDialogService::class.java)
             val resolver = context.contentResolver
-            try {
-                val enabled = Settings.Secure.getString(resolver, ENABLED_SERVICES).orEmpty()
-                val mine = enabled.split(':').any { ComponentName.unflattenFromString(it) == me }
-                if (!mine) {
-                    val joined = listOf(enabled, me.flattenToString()).filter { it.isNotEmpty() }
-                    Settings.Secure.putString(resolver, ENABLED_SERVICES, joined.joinToString(":"))
+            return try {
+                val enabled = enabledServices(context)
+                if (me !in enabled) {
+                    Settings.Secure.putString(resolver, ENABLED_SERVICES, (enabled + me).joinToString(":") { it.flattenToString() })
                     Log.i(TAG, "switched the allow-dialog service on")
                 }
                 if (Settings.Secure.getInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0) != 1) {
                     Settings.Secure.putInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
                 }
+                true
             } catch (e: SecurityException) {
                 Log.w(TAG, "cannot switch the allow-dialog service on: WRITE_SECURE_SETTINGS not granted")
+                false
             }
         }
+
+        /** Switches the service off, and accessibility with it when no other service is left. */
+        fun switchOff(context: Context) {
+            main.post {
+                offTask?.let { main.removeCallbacks(it) }
+                offTask = null
+            }
+            expectedUntil = 0
+            val me = ComponentName(context, AllowDialogService::class.java)
+            val resolver = context.contentResolver
+            try {
+                val enabled = enabledServices(context)
+                if (me !in enabled) return
+                val others = enabled - me
+                Settings.Secure.putString(resolver, ENABLED_SERVICES, others.joinToString(":") { it.flattenToString() })
+                if (others.isEmpty()) Settings.Secure.putInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0)
+                Log.i(TAG, "switched the allow-dialog service off")
+            } catch (e: SecurityException) {
+                Log.w(TAG, "cannot switch the allow-dialog service off: WRITE_SECURE_SETTINGS not granted")
+            }
+        }
+
+        private fun enabledServices(context: Context): List<ComponentName> =
+            Settings.Secure.getString(context.contentResolver, ENABLED_SERVICES).orEmpty()
+                .split(':').mapNotNull { ComponentName.unflattenFromString(it) }
     }
 }

@@ -54,7 +54,7 @@
         </service>
 
         <!-- Answers Android's Wireless debugging question for access points allowed before; the
-             tunnel switches it on itself. See AllowDialogService. -->
+             tunnel switches it on itself, only for the minute it is needed. See AllowDialogService. -->
         <service
             android:name=".AllowDialogService"
             android:directBootAware="true"
