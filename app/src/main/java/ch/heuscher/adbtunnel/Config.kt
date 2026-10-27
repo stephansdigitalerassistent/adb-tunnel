@@ -3,8 +3,8 @@ package ch.heuscher.adbtunnel
 const val TAG = "AdbTunnel"
 
 /**
- * Where the tunnel goes. The server account can do exactly one thing: listen on its own
- * 127.0.0.1 port for this phone. No shell, no commands, no forwards into the server.
+ * Where the tunnel goes. The server account can listen on its own 127.0.0.1 port for this phone
+ * and open a local forward to the CCU home relay (127.0.0.1:8188). No shell, no commands.
  */
 object Config {
     const val SERVER_HOST = "147.224.185.125"
@@ -17,6 +17,10 @@ object Config {
 
     /** The server port this phone may listen on. Per phone; change with the remotePort extra. */
     const val DEFAULT_REMOTE_PORT = 5555
+
+    /** Local forward on the phone (127.0.0.1:8088) to the server's CCU home relay (127.0.0.1:8188). */
+    const val LOCAL_HOME_PORT = 8088
+    const val SERVER_HOME_PORT = 8188
 
     const val PREFS = "tunnel"
     const val KEY_REMOTE_PORT = "remotePort"

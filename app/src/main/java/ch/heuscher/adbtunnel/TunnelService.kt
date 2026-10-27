@@ -190,6 +190,13 @@ class TunnelService : Service() {
                 session = connected
                 try {
                     connected.setPortForwardingR(AdbPort.LOOPBACK, remotePort, AdbPort.LOOPBACK, port)
+                    try {
+                        connected.setPortForwardingL(
+                            AdbPort.LOOPBACK, Config.LOCAL_HOME_PORT, AdbPort.LOOPBACK, Config.SERVER_HOME_PORT
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "home forward :${Config.LOCAL_HOME_PORT} failed: ${e.message}")
+                    }
                     var current: Int = port
                     update(upText(remotePort, current), isUp = true)
                     while (connected.isConnected) {
@@ -233,6 +240,10 @@ class TunnelService : Service() {
                     update("Retrying in 10 s: ${e.message}")
                 } finally {
                     holdAwake()
+                    try {
+                        connected.delPortForwardingL(AdbPort.LOOPBACK, Config.LOCAL_HOME_PORT)
+                    } catch (_: Exception) {
+                    }
                     connected.disconnect()
                     session = null
                 }

@@ -3,7 +3,9 @@
 One icon that exposes this phone's wireless adb to the assistant server, and nothing else.
 
 Pressing it switches Wireless debugging on, finds adbd's current port, and holds a reverse SSH
-tunnel — server `127.0.0.1:5555` → phone adbd — in a foreground service with a Stop button.
+tunnel — server `127.0.0.1:5555` → phone adbd — plus a local forward — phone `127.0.0.1:8088` →
+server `127.0.0.1:8188` (the CCU3 home app relay, so `http://localhost:8088` works on the phone
+over mobile data and Wi-Fi alike) — in a foreground service with a Stop button.
 Pressing it again only reports the status.
 
 Once started it stays on until Stop is pressed: it comes back by itself after the phone restarts
@@ -37,13 +39,15 @@ once the phone is unlocked.
 
 ## The server side
 
-The phone logs in as `adbtunnel`, an account that can only listen on its own loopback port:
-`/sbin/nologin` shell, and a `Match User adbtunnel` block in `/etc/ssh/sshd_config` with
-`AllowTcpForwarding remote`, `PermitListen 127.0.0.1:5555 127.0.0.1:5556 127.0.0.1:5557 127.0.0.1:5558 127.0.0.1:5559 127.0.0.1:5560`, `PermitTTY no` and
-`ForceCommand /sbin/nologin`. Each phone's key is further pinned to one port:
+The phone logs in as `adbtunnel`, an account that can only listen on its own loopback port and open
+a local forward to `127.0.0.1:8188`: `/sbin/nologin` shell, and a `Match User adbtunnel` block in
+`/etc/ssh/sshd_config` with `AllowTcpForwarding yes`, `PermitOpen 127.0.0.1:8188`,
+`PermitListen 127.0.0.1:5555 127.0.0.1:5556 127.0.0.1:5557 127.0.0.1:5558 127.0.0.1:5559 127.0.0.1:5560 127.0.0.1:5561 127.0.0.1:5562 127.0.0.1:5563`,
+`PermitTTY no` and `ForceCommand /sbin/nologin`. Each phone's key is further pinned to one listen
+port and the `8188` forward:
 
 ```
-restrict,port-forwarding,permitlisten="127.0.0.1:5555" ecdsa-sha2-nistp256 AAAA… adbtunnel-SM-S916B
+restrict,port-forwarding,permitopen="127.0.0.1:8188",permitlisten="127.0.0.1:5555" ecdsa-sha2-nistp256 AAAA… adbtunnel-SM-S916B
 ```
 
 The listen address must be given as `127.0.0.1`; `localhost` or no address is refused. The same
