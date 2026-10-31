@@ -86,6 +86,44 @@ class TunnelService : Service() {
     /** Between [letSleep] and [holdAwake]: the tunnel is up and the locks are let go. */
     @Volatile private var sleepAllowed = false
 
+    private val usbReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    Log.i(TAG, "USB device attached")
+                    handleUsbDeviceAttached()
+                }
+                android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    Log.i(TAG, "USB device detached")
+                    refreshUsbState()
+                }
+                UsbRescue.ACTION_USB_PERMISSION -> {
+                    val granted = intent.getBooleanExtra(android.hardware.usb.UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                    Log.i(TAG, "USB permission result: granted=$granted")
+                    if (granted) {
+                        UsbRescue.findAttachedAdbDevice(context)?.let { executeUsbRescue(it) }
+                    } else {
+                        refreshUsbState()
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        val filter = android.content.IntentFilter().apply {
+            addAction(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED)
+            addAction(UsbRescue.ACTION_USB_PERMISSION)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(usbReceiver, filter)
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -99,6 +137,10 @@ class TunnelService : Service() {
         if (intent?.action == ACTION_ASK_WIFI) {
             // The button only exists on the running tunnel's notification, so nothing else to start.
             Thread({ askForThisWifi() }, "ask-wifi").start()
+            return START_STICKY
+        }
+        if (intent?.action == ACTION_RESCUE_USB) {
+            handleUsbRescueAction()
             return START_STICKY
         }
         if (intent?.action == ACTION_CHECK && worker?.isAlive == true) {
@@ -140,6 +182,11 @@ class TunnelService : Service() {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(usbReceiver)
+        } catch (e: Exception) {
+            // ignore
+        }
         networkCallback?.let { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
         networkCallback = null
         worker?.interrupt()
@@ -597,6 +644,49 @@ class TunnelService : Service() {
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
     }
 
+    private fun handleUsbRescueAction() {
+        val adbDev = UsbRescue.findAttachedAdbDevice(this)
+        if (adbDev == null) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                android.widget.Toast.makeText(this, "No ADB USB device found", android.widget.Toast.SHORT).show()
+            }
+            return
+        }
+        if (!UsbRescue.hasUsbPermission(this, adbDev.device)) {
+            UsbRescue.requestUsbPermission(this, adbDev.device)
+            return
+        }
+        executeUsbRescue(adbDev)
+    }
+
+    private fun handleUsbDeviceAttached() {
+        val adbDev = UsbRescue.findAttachedAdbDevice(this)
+        if (adbDev != null) {
+            if (UsbRescue.hasUsbPermission(this, adbDev.device)) {
+                executeUsbRescue(adbDev)
+            } else {
+                UsbRescue.requestUsbPermission(this, adbDev.device)
+            }
+        }
+        refreshUsbState()
+    }
+
+    private fun executeUsbRescue(adbDev: UsbRescue.AdbDevice) {
+        val devName = adbDev.device.productName ?: adbDev.device.deviceName
+        Log.i(TAG, "Auto-rescuing attached USB device: $devName")
+        UsbRescue.rescueAttachedAsync(this) { success, msg ->
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                android.widget.Toast.makeText(this, msg, android.widget.Toast.LONG).show()
+            }
+            refreshUsbState()
+        }
+    }
+
+    private fun refreshUsbState() = synchronized(this) {
+        if (!running) return
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
+    }
+
     /**
      * "Ask for this Wi-Fi" only makes sense on a Wi-Fi not allowed yet: off Wi-Fi there is nothing to
      * ask, and on an allowed access point it would only switch Wireless debugging off and on. An
@@ -656,6 +746,19 @@ class TunnelService : Service() {
             builder.addAction(
                 Notification.Action.Builder(
                     Icon.createWithResource(this, R.drawable.ic_stat_tunnel), "Ask for this Wi-Fi", askWifi
+                ).build()
+            )
+        }
+        val adbDev = UsbRescue.findAttachedAdbDevice(this)
+        if (adbDev != null) {
+            val devName = adbDev.device.productName ?: adbDev.device.deviceName
+            val rescueUsb = PendingIntent.getService(
+                this, 3, Intent(this, TunnelService::class.java).setAction(ACTION_RESCUE_USB),
+                PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, R.drawable.ic_stat_tunnel), "Rescue $devName (5555)", rescueUsb
                 ).build()
             )
         }
@@ -777,6 +880,7 @@ class TunnelService : Service() {
 
         private const val ACTION_STOP = "ch.heuscher.adbtunnel.STOP"
         private const val ACTION_ASK_WIFI = "ch.heuscher.adbtunnel.ASK_WIFI"
+        private const val ACTION_RESCUE_USB = "ch.heuscher.adbtunnel.RESCUE_USB"
         private const val ACTION_CHECK = "ch.heuscher.adbtunnel.CHECK"
         private const val CHANNEL = "tunnel"
         private const val NOTIFICATION_ID = 1

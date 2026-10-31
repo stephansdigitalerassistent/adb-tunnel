@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -12,6 +13,7 @@ import android.widget.Toast
 /**
  * The icon. Starts the tunnel, or — when it is already running — only says how it is doing.
  * Pressing it any number of times gives one tunnel. It shows no screen of its own.
+ * Also handles USB device attachment to automatically rescue connected ADB devices.
  *
  * To give a phone a different server port (the Fold uses 5556):
  * `adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity --ei remotePort 5556`
@@ -28,6 +30,8 @@ class TunnelActivity : Activity() {
         // Public, so logging it is harmless — and it is how the key reaches the server's list.
         Log.i(TAG, "public key: " + Keys.publicKey(this))
 
+        checkUsbRescue()
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -36,6 +40,22 @@ class TunnelActivity : Activity() {
             return
         }
         startTunnel()
+    }
+
+    private fun checkUsbRescue() {
+        val adbDev = UsbRescue.findAttachedAdbDevice(this)
+        if (adbDev != null) {
+            if (UsbRescue.hasUsbPermission(this, adbDev.device)) {
+                Toast.makeText(this, "Rescuing attached USB device...", Toast.LENGTH_SHORT).show()
+                UsbRescue.rescueAttachedAsync(this) { success, msg ->
+                    runOnUiThread {
+                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                    }
+                }
+            } else {
+                UsbRescue.requestUsbPermission(this, adbDev.device)
+            }
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
