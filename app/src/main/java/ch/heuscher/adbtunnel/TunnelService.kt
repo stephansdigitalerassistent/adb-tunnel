@@ -648,7 +648,7 @@ class TunnelService : Service() {
         val adbDev = UsbRescue.findAttachedAdbDevice(this)
         if (adbDev == null) {
             android.os.Handler(android.os.Looper.getMainLooper()).post {
-                android.widget.Toast.makeText(this, "No ADB USB device found", android.widget.Toast.SHORT).show()
+                android.widget.Toast.makeText(this, "No ADB USB device found", android.widget.Toast.LENGTH_SHORT).show()
             }
             return
         }
@@ -676,7 +676,7 @@ class TunnelService : Service() {
         Log.i(TAG, "Auto-rescuing attached USB device: $devName")
         UsbRescue.rescueAttachedAsync(this) { success, msg ->
             android.os.Handler(android.os.Looper.getMainLooper()).post {
-                android.widget.Toast.makeText(this, msg, android.widget.Toast.LONG).show()
+                android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
             }
             refreshUsbState()
         }
