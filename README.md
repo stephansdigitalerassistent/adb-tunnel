@@ -53,10 +53,17 @@ restrict,port-forwarding,permitopen="127.0.0.1:8188",permitlisten="127.0.0.1:555
 The listen address must be given as `127.0.0.1`; `localhost` or no address is refused. The same
 block has `ClientAliveInterval 300` / `ClientAliveCountMax 3`, so a session lost with a network change
 frees the port within about 15 min and the phone's new session can take it. Until then the app logs
-in fine but gets "remote port forwarding failed", and retries every 10 s. Pinging more often would
-free the port sooner, but every ping wakes a sleeping phone: at 60 s a P20 Pro woke about once a
-minute, and at 10 s Huawei's PowerGenie flagged the app. A change here reaches a phone only with its
-next login; running sessions keep the old value.
+in fine but gets "remote port forwarding failed", and retries. Pinging more often would free the
+port sooner, but every ping wakes a sleeping phone: at 60 s a P20 Pro woke about once a minute, and at
+10 s Huawei's PowerGenie flagged the app. A change here reaches a phone only with its next login;
+running sessions keep the old value.
+
+Retries are paced so that a tunnel that cannot come up does not drain the phone. The first 2 min of
+failing stay awake with a try every 10 s, then the phone sleeps between tries: 1, 2, 4 and 8 min, then
+every 10 min. A new network or the screen coming on starts over, and while the screen is on the tries
+stay quick. With no network at all nothing is tried and nothing is held until one comes. Every wake
+lock is timed, so no path can keep a phone awake for more than 10 min at a stretch. The cost: on an
+idle phone that stays on the same network, a port held for 15 min can come back up to 10 min late.
 
 Those 15 min are not guaranteed: while adb on the server keeps knocking on the dead port, sshd never
 sends its probe, and such a session has held the port for 16 min, until TCP gave up. So the server

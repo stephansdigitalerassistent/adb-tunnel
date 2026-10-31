@@ -58,14 +58,17 @@ import kotlin.concurrent.withLock
  * Android 10 has no Wireless debugging ([WIRELESS_DEBUGGING]): there only TCP mode is looked for,
  * and after every restart someone has to switch it on again over USB.
  *
- * The phone stays awake only while the tunnel is being built ([holdAwake]). Once it is up the
- * locks are let go ([letSleep]). Asleep, the phone's timers stand still, so an alarm ([ACTION_CHECK])
- * wakes it at least every [CHECK_ALARM_MS] for a check that pings the server: after a failover or a
- * server reboot only the phone's own packet brings back the reset that ends the dead session.
- * A session the server closes wakes the loop at once ([WatchedSockets]).
+ * The phone stays awake only while the tunnel is being built ([holdAwake]), and never for long: that
+ * lock is timed, and a build that keeps failing gets [RetryPacing.AWAKE_WINDOW_MS] before the phone
+ * sleeps between tries ([waitToRetry]). Without any network nothing is tried at all ([waitForNetwork]).
+ * Once the tunnel is up the locks are let go ([letSleep]). Asleep, the phone's timers stand still, so
+ * an alarm ([ACTION_CHECK]) wakes it at least every [CHECK_ALARM_MS] for a check that pings the
+ * server: after a failover or a server reboot only the phone's own packet brings back the reset that
+ * ends the dead session. A session the server closes wakes the loop at once ([WatchedSockets]).
  * Each check takes a short timed wake lock. A lock held all the time had Huawei's PowerGenie book
  * the app as a "wakelock high power app", the likely road to the force-stop that left the P20's
- * tunnel down for four hours on 2026-10-15.
+ * tunnel down for four hours on 2026-10-15, and held in airplane mode it kept a Tab S6 awake for 13
+ * hours on 2026-10-31.
  */
 class TunnelService : Service() {
 
@@ -92,10 +95,11 @@ class TunnelService : Service() {
     /** adbd turned this app's key down: it was revoked, or expired. Pairing again brings it back. */
     @Volatile private var keyRefused = false
     private var nextRearmAt = 0L
-    /** Between [letSleep] and [holdAwake]: the tunnel is up and the locks are let go. */
+    /** Between [letSleep] and [holdAwake]: the locks are let go and the loop waits for a wake-up. */
     @Volatile private var sleepAllowed = false
+    private val retryPacing = RetryPacing()
 
-    private val usbReceiver = object : android.content.BroadcastReceiver() {
+    private val systemReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
@@ -106,6 +110,8 @@ class TunnelService : Service() {
                     Log.i(TAG, "USB device detached")
                     refreshUsbState()
                 }
+                // Someone is at the phone: a tunnel that is down should not make them wait for a long sleep.
+                Intent.ACTION_SCREEN_ON -> if (!up) wakeForCheck()
                 UsbRescue.ACTION_USB_PERMISSION -> {
                     val granted = intent.getBooleanExtra(android.hardware.usb.UsbManager.EXTRA_PERMISSION_GRANTED, false)
                     Log.i(TAG, "USB permission result: granted=$granted")
@@ -124,12 +130,13 @@ class TunnelService : Service() {
         val filter = android.content.IntentFilter().apply {
             addAction(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED)
+            addAction(Intent.ACTION_SCREEN_ON)
             addAction(UsbRescue.ACTION_USB_PERMISSION)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(systemReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
-            registerReceiver(usbReceiver, filter)
+            registerReceiver(systemReceiver, filter)
         }
     }
 
@@ -182,7 +189,8 @@ class TunnelService : Service() {
             synchronized(this) {
                 running = true
             }
-            acquireLocks()
+            createLocks()
+            keepAwakeForCheck() // The first round's own lock comes after the check for a network.
             watchNetwork()
             worker = Thread({ keepTunnelUp() }, "adb-tunnel").also { it.start() }
         }
@@ -196,7 +204,7 @@ class TunnelService : Service() {
 
     override fun onDestroy() {
         try {
-            unregisterReceiver(usbReceiver)
+            unregisterReceiver(systemReceiver)
         } catch (e: Exception) {
             // ignore
         }
@@ -227,12 +235,21 @@ class TunnelService : Service() {
     private fun keepTunnelUp() {
         val remotePort = Storage.of(this).getSharedPreferences(Config.PREFS, MODE_PRIVATE)
             .getInt(Config.KEY_REMOTE_PORT, Config.DEFAULT_REMOTE_PORT)
+        // The last try failed: showing "Connecting" before the next one would repost the notification
+        // each round, and on a Tab S6 that was 11,091 posts in under 16 hours of retrying.
+        var failing = false
         try {
             while (!Thread.currentThread().isInterrupted) {
                 // Left on by a process that died within the minute it was needed.
                 if (WIRELESS_DEBUGGING) AllowDialogService.switchOffUnlessExpected(this)
                 keepAdbdOn()
                 refreshAskButton()
+                if (offline()) {
+                    failing = false
+                    waitForNetwork()
+                    continue
+                }
+                holdAwake()
                 val found = AdbPort.find(this, ::wirelessDebuggingOn)
                 adbPort = found ?: 0
                 if (found == null) {
@@ -242,15 +259,17 @@ class TunnelService : Service() {
                 val port = if (rearmTcpMode(found)) TCP_MODE_PORT else found
                 adbPort = port
                 noteWirelessWorked(port)
-                update("Connecting to the server…")
+                if (!failing) update("Connecting to the server…")
                 val connected = try {
                     connect()
                 } catch (e: Exception) {
                     update("Server not reachable, retrying: ${e.message}")
-                    nap(10_000)
+                    failing = true
+                    waitToRetry(RETRY_MS)
                     continue
                 }
                 session = connected
+                var upSince = NOT_UP
                 try {
                     connected.setPortForwardingR(AdbPort.LOOPBACK, remotePort, AdbPort.LOOPBACK, port)
                     try {
@@ -262,6 +281,8 @@ class TunnelService : Service() {
                     }
                     var current: Int = port
                     update(upText(remotePort, current), isUp = true)
+                    failing = false
+                    upSince = SystemClock.elapsedRealtime()
                     while (connected.isConnected) {
                         letSleep()
                         nap(15_000)
@@ -301,7 +322,8 @@ class TunnelService : Service() {
                 } catch (e: Exception) {
                     // Most often "remote port forwarding failed": the server still holds the port
                     // for a session lost on the previous network, until its keep-alive gives up.
-                    update("Retrying in 10 s: ${e.message}")
+                    update("Retrying: ${e.message}")
+                    failing = true
                 } finally {
                     holdAwake()
                     try {
@@ -311,7 +333,9 @@ class TunnelService : Service() {
                     connected.disconnect()
                     session = null
                 }
-                nap(10_000)
+                // A tunnel that falls over right after coming up has not earned a new awake window.
+                if (upSince != NOT_UP && SystemClock.elapsedRealtime() - upSince >= HELD_MS) retryPacing.restart()
+                waitToRetry(RETRY_MS)
             }
         } catch (e: InterruptedException) {
             // Stop was pressed.
@@ -380,7 +404,37 @@ class TunnelService : Service() {
      */
     private fun waitForAdb() {
         update(adbMissingText())
-        nap(if (onWifi() || !WIRELESS_DEBUGGING) 5_000 else 30_000)
+        waitToRetry(if (onWifi() || !WIRELESS_DEBUGGING) 5_000 else 30_000)
+    }
+
+    /**
+     * Without a network there is nothing to try and nothing that needs the phone awake: the network
+     * callback ends the wait. The alarm is only there in case a callback never comes.
+     */
+    private fun waitForNetwork() {
+        update("No network, waiting for one")
+        letSleep(OFFLINE_CHECK_MS)
+        // Asked inside the lock: a network that comes right now cannot signal before the wait begins.
+        napLock.withLock { if (offline()) networkChanged.await(OFFLINE_CHECK_MS, TimeUnit.MILLISECONDS) }
+    }
+
+    /**
+     * Between two tries at building the tunnel: [awakeMs] while [retryPacing] keeps the phone awake
+     * or someone is at it, after that with the locks let go until an alarm, the network or the
+     * screen ends the sleep. With the screen on the phone is awake anyway and waiting long only
+     * hides the fix someone just made, so that counts as a new start. The screen coming on ends a
+     * sleep through [systemReceiver].
+     */
+    private fun waitToRetry(awakeMs: Long) {
+        if (offline()) return // The loop's own check takes it from here, without waiting for [awakeMs].
+        if (getSystemService(PowerManager::class.java).isInteractive) retryPacing.restart()
+        val sleepMs = retryPacing.nextSleepMs(SystemClock.elapsedRealtime())
+        if (sleepMs == 0L) {
+            nap(awakeMs)
+        } else {
+            letSleep(sleepMs)
+            nap(sleepMs)
+        }
     }
 
     /**
@@ -423,7 +477,8 @@ class TunnelService : Service() {
     /**
      * A move between Wi-Fi and mobile data leaves the SSH socket dead without an error, and the
      * keep-alives would only notice after 90 s. So on a new default network the session is dropped
-     * straight away and the loop woken to build a new one.
+     * straight away and the loop woken to build a new one. A network also ends [waitForNetwork], and
+     * losing the last one has the loop find that out now, not at the next check alarm.
      */
     private fun watchNetwork() {
         val callback = object : ConnectivityManager.NetworkCallback() {
@@ -437,10 +492,19 @@ class TunnelService : Service() {
                     session?.let { Thread { it.disconnect() }.start() }
                 }
                 refreshAskButton()
-                napLock.withLock { networkChanged.signalAll() }
+                retryPacing.restart()
+                wakeForCheck()
             }
 
-            override fun onLost(network: Network) = refreshAskButton()
+            override fun onLost(network: Network) {
+                refreshAskButton()
+                wakeForCheck()
+            }
+
+            // Doze can hide the network from this app, which [offline] then sees as none.
+            override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+                if (!blocked) wakeForCheck()
+            }
         }
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(callback)
         networkCallback = callback
@@ -468,6 +532,10 @@ class TunnelService : Service() {
     }
 
     private fun onWifi(): Boolean = currentWifiNetwork() != null
+
+    /** Airplane mode or simply no signal: no default network, not even a Wi-Fi without internet. */
+    private fun offline(): Boolean =
+        getSystemService(ConnectivityManager::class.java).activeNetwork == null && !onWifi()
 
     private fun currentBssid(): String? {
         val cm = getSystemService(ConnectivityManager::class.java) ?: return null
@@ -856,13 +924,13 @@ class TunnelService : Service() {
     }
 
     @Suppress("DEPRECATION") // WIFI_MODE_FULL_HIGH_PERF: the low-latency mode only holds while in the foreground UI.
-    private fun acquireLocks() {
+    private fun createLocks() {
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "adbtunnel:tunnel")
-            .apply { setReferenceCounted(false); acquire() }
+            .apply { setReferenceCounted(false) }
         wifiLock = applicationContext.getSystemService(WifiManager::class.java)
             .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "adbtunnel:tunnel")
-            .apply { setReferenceCounted(false); acquire() }
+            .apply { setReferenceCounted(false) }
     }
 
     /**
@@ -892,7 +960,7 @@ class TunnelService : Service() {
                 throw e
             }
 
-        /** Only an up tunnel's loop waits for it; while building, waking would skip the back-off. */
+        /** Only a loop that let go of the locks waits for it; while building, it would skip the wait. */
         private fun sessionEnded() {
             if (sleepAllowed) wakeForCheck()
         }
@@ -904,7 +972,7 @@ class TunnelService : Service() {
         napLock.withLock { networkChanged.signalAll() }
     }
 
-    /** A short timed lock for one check; never shortens the untimed one [holdAwake] took. */
+    /** A short timed lock for one check; never shortens the longer one [holdAwake] took. */
     private fun keepAwakeForCheck() {
         wakeLock?.takeIf { !it.isHeld }?.acquire(CHECK_AWAKE_MS)
     }
@@ -915,25 +983,33 @@ class TunnelService : Service() {
         )
     }
 
-    /** Building the tunnel: retries and back-offs must not stall in deep sleep. */
+    /**
+     * Building the tunnel: one try must not stall in deep sleep. Timed, so nothing that goes wrong
+     * in the loop can keep the phone awake past [HOLD_AWAKE_MS]; each round takes it anew. The alarm
+     * stays set meanwhile, in case the phone falls asleep in a try that outlasted the lock.
+     */
     private fun holdAwake() {
         sleepAllowed = false
-        getSystemService(AlarmManager::class.java).cancel(checkAlarm)
-        wakeLock?.acquire()
+        setCheckAlarm(CHECK_ALARM_MS)
+        wakeLock?.acquire(HOLD_AWAKE_MS)
         wifiLock?.acquire()
     }
 
     /**
-     * The tunnel is up: the phone may sleep, and Wi-Fi may save power, between checks. Each call
-     * moves the check alarm on, so it only fires when no check ran for [CHECK_ALARM_MS].
+     * Nothing to do for now: the phone may sleep, and Wi-Fi may save power, until [checkInMs] from
+     * now at the latest. Each call moves the check alarm on, so it only fires when no check ran.
      */
-    private fun letSleep() {
-        getSystemService(AlarmManager::class.java).setAndAllowWhileIdle(
-            AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + CHECK_ALARM_MS, checkAlarm
-        )
+    private fun letSleep(checkInMs: Long = CHECK_ALARM_MS) {
+        setCheckAlarm(checkInMs)
         wakeLock?.takeIf { it.isHeld }?.release()
         wifiLock?.takeIf { it.isHeld }?.release()
         sleepAllowed = true
+    }
+
+    private fun setCheckAlarm(inMs: Long) {
+        getSystemService(AlarmManager::class.java).setAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + inMs, checkAlarm
+        )
     }
 
     private fun releaseLocks() {
@@ -992,8 +1068,16 @@ class TunnelService : Service() {
         private const val FALLBACK_RETRY_MS = 30_000L
         /** One check of a running tunnel: probe adbd, maybe move the forward. */
         private const val CHECK_AWAKE_MS = 10_000L
+        /** A safety limit, not how long a try takes: the port scan alone has taken six minutes. */
+        private const val HOLD_AWAKE_MS = 10 * 60_000L
+        private const val RETRY_MS = 10_000L
+        /** How long a tunnel has to stay up to count as working again. */
+        private const val HELD_MS = 60_000L
+        private const val NOT_UP = -1L
         private const val CONNECT_TIMEOUT_MS = 15_000
         /** Doze lets an idle alarm through at most every 9 minutes. */
         private const val CHECK_ALARM_MS = 10 * 60_000L
+        /** Only for a network callback that never came, so an airplane-mode night stays quiet. */
+        private const val OFFLINE_CHECK_MS = 30 * 60_000L
     }
 }
