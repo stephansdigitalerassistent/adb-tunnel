@@ -32,6 +32,10 @@ android {
         targetSdk = 36
         versionCode = appVersionCode
         versionName = "1.0.$appVersionCode"
+        // The bundled TLS library's native code. The Xperia Z1 Compact is a 32-bit phone.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     signingConfigs {
@@ -70,4 +74,7 @@ android {
 
 dependencies {
     implementation("com.github.mwiede:jsch:2.28.7")
+    // Android's own TLS has no keying material export, which adb pairing needs. 2.8.0 is 16 KB aligned.
+    implementation("org.conscrypt:conscrypt-android:2.8.0")
+    testImplementation("junit:junit:4.13.2")
 }

@@ -17,6 +17,9 @@ import android.widget.Toast
  *
  * To give a phone a different server port (the Fold uses 5556):
  * `adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity --ei remotePort 5556`
+ *
+ * Likewise to pair by hand, with the dialog open (pairPort is optional):
+ * `am start -n ch.heuscher.adbtunnel/.TunnelActivity --es pairCode 123456 --ei pairPort 37123`
  */
 class TunnelActivity : Activity() {
 
@@ -67,7 +70,7 @@ class TunnelActivity : Activity() {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
         // From now on it comes back after restarts and updates, until Stop.
         TunnelService.setWanted(this, true)
-        startForegroundService(Intent(this, TunnelService::class.java))
+        startForegroundService(Intent(this, TunnelService::class.java).putExtras(intent))
         finish()
     }
 }

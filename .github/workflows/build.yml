@@ -42,7 +42,7 @@ jobs:
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace
+          ./gradlew testDebugUnitTest assembleDebug --stacktrace
 
       # A release asset rather than a build artifact: artifact storage is shared with the other
       # repositories on this account and fills up. Delete-then-create so the tag follows the commit.

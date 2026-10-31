@@ -6,6 +6,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.RemoteInput
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -51,6 +52,8 @@ import kotlin.concurrent.withLock
  * The tunnel itself needs no Wi-Fi. adbd does, unless it is in TCP mode (`adb tcpip 5555`), which
  * the server switches on through the first tunnel after each reboot — see server/ in this repo —
  * and unless USB debugging is on: with USB and Wireless debugging both off, Android stops adbd.
+ * A phone paired with its own adbd ([SelfAdb]) switches TCP mode on by itself as soon as Wireless
+ * debugging is up ([rearmTcpMode]), without the server and without a tunnel.
  *
  * Android 10 has no Wireless debugging ([WIRELESS_DEBUGGING]): there only TCP mode is looked for,
  * and after every restart someone has to switch it on again over USB.
@@ -83,6 +86,12 @@ class TunnelService : Service() {
     /** Android switched Wireless debugging back off here before the first unlock; asked again after it. */
     @Volatile private var flippedBeforeUnlock: String? = null
     @Volatile private var askShown = false
+    @Volatile private var pairShown = false
+    /** The port the tunnel forwards to, 0 while adb is not found. */
+    @Volatile private var adbPort = 0
+    /** adbd turned this app's key down: it was revoked, or expired. Pairing again brings it back. */
+    @Volatile private var keyRefused = false
+    private var nextRearmAt = 0L
     /** Between [letSleep] and [holdAwake]: the tunnel is up and the locks are let go. */
     @Volatile private var sleepAllowed = false
 
@@ -178,6 +187,10 @@ class TunnelService : Service() {
             worker = Thread({ keepTunnelUp() }, "adb-tunnel").also { it.start() }
         }
         if (intent == null) Log.i(TAG, "restarted by Android")
+        intent?.let(::pairingCode)?.let { code ->
+            val port = intent.getIntExtra(Config.EXTRA_PAIR_PORT, 0)
+            Thread({ pair(code, port) }, "adb-pair").start()
+        }
         return START_STICKY
     }
 
@@ -220,11 +233,14 @@ class TunnelService : Service() {
                 if (WIRELESS_DEBUGGING) AllowDialogService.switchOffUnlessExpected(this)
                 keepAdbdOn()
                 refreshAskButton()
-                val port = AdbPort.find(this, ::wirelessDebuggingOn)
-                if (port == null) {
+                val found = AdbPort.find(this, ::wirelessDebuggingOn)
+                adbPort = found ?: 0
+                if (found == null) {
                     waitForAdb()
                     continue
                 }
+                val port = if (rearmTcpMode(found)) TCP_MODE_PORT else found
+                adbPort = port
                 noteWirelessWorked(port)
                 update("Connecting to the server…")
                 val connected = try {
@@ -259,13 +275,14 @@ class TunnelService : Service() {
                         // A Wireless debugging port dies with the Wi-Fi, TCP mode does not: move to
                         // it as soon as it is there, even while the current port still answers.
                         val next = when {
-                            current != TCP_MODE_PORT && AdbPort.isAdb(TCP_MODE_PORT) -> TCP_MODE_PORT
+                            current != TCP_MODE_PORT && (AdbPort.isAdb(TCP_MODE_PORT) || rearmTcpMode(current)) -> TCP_MODE_PORT
                             AdbPort.isAdb(current) -> current
                             else -> {
                                 keepAdbdOn()
                                 AdbPort.find(this, ::wirelessDebuggingOn)
                             }
                         }
+                        adbPort = next ?: 0
                         if (next == null) {
                             update(adbMissingText())
                             continue
@@ -299,6 +316,60 @@ class TunnelService : Service() {
         } catch (e: InterruptedException) {
             // Stop was pressed.
         }
+    }
+
+    /**
+     * Switches adbd to TCP mode over Wireless debugging [port], the job the server's re-arm does
+     * through the tunnel. Paired phones only, and at most every [REARM_RETRY_MS], as it restarts
+     * adbd. True when 5555 answers afterwards.
+     */
+    private fun rearmTcpMode(port: Int): Boolean {
+        if (port == TCP_MODE_PORT || !WIRELESS_DEBUGGING || !SelfAdb.paired(this)) return false
+        val now = SystemClock.elapsedRealtime()
+        if (now < nextRearmAt) return false
+        nextRearmAt = now + REARM_RETRY_MS
+        try {
+            SelfAdb.switchOnTcpMode(this, port, TCP_MODE_PORT)
+            keyRefused = false
+            Log.i(TAG, "switched adb to TCP mode over :$port")
+        } catch (e: AdbKeyRefused) {
+            Log.w(TAG, "adbd no longer accepts this app's key")
+            keyRefused = true
+            refreshAskButton()
+            return false
+        } catch (e: IOException) {
+            Log.w(TAG, "could not switch adb to TCP mode: ${e.message}")
+            return false
+        }
+        repeat(REARM_CHECKS) {
+            nap(1_000)
+            if (AdbPort.isAdb(TCP_MODE_PORT)) return true
+        }
+        return false
+    }
+
+    /** The code typed into the notification, or given as an extra to the icon. */
+    private fun pairingCode(intent: Intent): String? =
+        (RemoteInput.getResultsFromIntent(intent)?.getCharSequence(Config.EXTRA_PAIR_CODE)
+            ?: intent.getStringExtra(Config.EXTRA_PAIR_CODE))?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun pair(code: String, port: Int) {
+        val message = try {
+            SelfAdb.pair(this, code, port)
+            keyRefused = false
+            nextRearmAt = 0
+            "Paired with this phone's adb"
+        } catch (e: WrongPairingCode) {
+            "Wrong pairing code, or the dialog closed"
+        } catch (e: IOException) {
+            "Pairing failed: ${e.message}"
+        }
+        Log.i(TAG, message)
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
+        }
+        refreshAskButton()
+        wakeForCheck()
     }
 
     private fun upText(remotePort: Int, phonePort: Int) = "Up: server :$remotePort → phone :$phonePort"
@@ -691,16 +762,20 @@ class TunnelService : Service() {
      * "Ask for this Wi-Fi" only makes sense on a Wi-Fi not allowed yet: off Wi-Fi there is nothing to
      * ask, and on an allowed access point it would only switch Wireless debugging off and on. An
      * unreadable BSSID counts as not allowed. Re-posts the notification when that changes, which
-     * also turns the icon orange or back.
+     * also turns the icon orange or back. Likewise for the Pair button.
      */
     private fun refreshAskButton() = synchronized(this) {
         if (!running) return
-        if (wantAskButton() != askShown) {
+        if (wantAskButton() != askShown || wantPairButton() != pairShown) {
             getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
         }
     }
 
     private fun wantAskButton(): Boolean = WIRELESS_DEBUGGING && onWifi() &&!allowedWifi.contains(currentBssid())
+
+    /** Only on a Wireless debugging port: a phone in TCP mode has no use for it, and nobody to press it. */
+    private fun wantPairButton(): Boolean =
+        WIRELESS_DEBUGGING && adbPort != 0 && adbPort != TCP_MODE_PORT && (keyRefused || !SelfAdb.paired(this))
 
     private fun goForeground() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
@@ -760,6 +835,21 @@ class TunnelService : Service() {
                 Notification.Action.Builder(
                     Icon.createWithResource(this, R.drawable.ic_stat_tunnel), "Rescue $devName (5555)", rescueUsb
                 ).build()
+            )
+        }
+        val showPair = wantPairButton()
+        pairShown = showPair
+        if (showPair) {
+            // Mutable, or the typed code would not arrive.
+            val mutable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+            val pair = PendingIntent.getService(
+                this, 4, Intent(this, TunnelService::class.java).setAction(ACTION_PAIR),
+                PendingIntent.FLAG_UPDATE_CURRENT or mutable
+            )
+            builder.addAction(
+                Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat_tunnel), "Pair", pair)
+                    .addRemoteInput(RemoteInput.Builder(Config.EXTRA_PAIR_CODE).setLabel("Pairing code").build())
+                    .build()
             )
         }
         return builder.build()
@@ -882,6 +972,7 @@ class TunnelService : Service() {
         private const val ACTION_ASK_WIFI = "ch.heuscher.adbtunnel.ASK_WIFI"
         private const val ACTION_RESCUE_USB = "ch.heuscher.adbtunnel.RESCUE_USB"
         private const val ACTION_CHECK = "ch.heuscher.adbtunnel.CHECK"
+        private const val ACTION_PAIR = "ch.heuscher.adbtunnel.PAIR"
         private const val CHANNEL = "tunnel"
         private const val NOTIFICATION_ID = 1
         private const val ADB_WIFI_ENABLED = "adb_wifi_enabled"
@@ -893,6 +984,9 @@ class TunnelService : Service() {
         private val WIRELESS_DEBUGGING = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
         /** The port the server's `adb tcpip` puts adbd on. */
         private const val TCP_MODE_PORT = 5555
+        private const val REARM_RETRY_MS = 5 * 60_000L
+        /** Seconds adbd gets to come back on 5555. */
+        private const val REARM_CHECKS = 6
         /** How long after adb last answered over Wireless debugging the fallback still retries. */
         private const val FALLBACK_WORKED_MS = 10 * 60_000L
         private const val FALLBACK_RETRY_MS = 30_000L

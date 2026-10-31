@@ -110,6 +110,37 @@ On setup, the `POST_NOTIFICATIONS` and location grants below do not apply (Andro
 ignores them); `WRITE_SECURE_SETTINGS` still keeps USB debugging on. On Huawei also set Settings →
 Battery → App launch → *adb tunnel* to manual with all three switches on, or EMUI stops it.
 
+## Pairing the app with adbd
+
+From Android 11 on the app can be its own adb client, so a phone gets TCP mode back after a restart
+without the server and without a cable: on a Wi-Fi Android already allows, Wireless debugging comes
+up, and the app sends adbd `tcpip:5555` itself over TLS. That takes one pairing per phone:
+
+1. Settings → Developer options → Wireless debugging → *Pair device with pairing code*. Leave the
+   dialog open.
+2. Pull down the notification, press *Pair*, type the six-digit code. A toast says how it went.
+
+The *Pair* button only shows while adb is on a Wireless debugging port and the app is not paired, or
+adbd has turned its key down: a phone in TCP mode has no use for it. By hand, with the dialog open
+(`--ei pairPort` is optional):
+
+```
+adb shell am start -n ch.heuscher.adbtunnel/.TunnelActivity --es pairCode 123456 --ei pairPort 37123
+```
+
+Once paired the app also grants itself the permissions under *Setting up a phone* that are still
+missing, so a phone can be set up with no computer but for the server's half: the SSH public key
+and `remotePort` still need adb, or a tunnel already up. The re-arm is tried at most every 5 minutes,
+as `tcpip` restarts adbd. A paired key can expire after 7 days without use like any other: set
+*Disable adb authorization timeout* in the developer options.
+
+Android 10 has no Wireless debugging and stays with USB. Android 12 and up go on working with the
+server's re-arm as before: the app's own one comes first and leaves it nothing to do.
+
+The protocols are in `AdbPairing.kt` (TLS exporter, SPAKE2, AES-GCM), `Spake2.kt` and `AdbTlsClient.kt`.
+Conscrypt is bundled because Android's own TLS does not export keying material. Its native library
+comes for `arm64-v8a` and `armeabi-v7a`, so the APK no longer installs on an x86 phone or emulator.
+
 ## Setting up a phone
 
 ```

@@ -10,8 +10,10 @@ object AdbProtocol {
     const val A_OKAY = 0x59414b4f
     const val A_CLSE = 0x45534c43
     const val A_WRTE = 0x45545257
+    const val A_STLS = 0x534c5453
 
     const val A_VERSION = 0x01000001
+    const val A_STLS_VERSION = 0x01000000
     const val MAX_PAYLOAD = 1024 * 1024
 
     const val AUTH_TYPE_TOKEN = 1

@@ -26,5 +26,11 @@ object Config {
     const val KEY_REMOTE_PORT = "remotePort"
     /** True from pressing the icon until pressing Stop. See TunnelService.wanted. */
     const val KEY_WANTED = "wanted"
+    /** True once this app's key is paired with Wireless debugging. See SelfAdb. */
+    const val KEY_PAIRED = "paired"
     const val EXTRA_REMOTE_PORT = "remotePort"
+    /** The code of Android's "Pair device with pairing code" dialog, by notification or by extra. */
+    const val EXTRA_PAIR_CODE = "pairCode"
+    /** The dialog's port. Without it the app looks it up. */
+    const val EXTRA_PAIR_PORT = "pairPort"
 }

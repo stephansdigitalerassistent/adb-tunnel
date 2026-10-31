@@ -6,7 +6,9 @@ import android.net.nsd.NsdServiceInfo
 import android.util.Log
 import java.io.DataInputStream
 import java.net.ConnectException
+import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -42,8 +44,12 @@ object AdbPort {
     private const val NONE = -1
 
     /** What adbd announces its Wireless debugging port as, for `adb mdns services` to find. */
-    private const val MDNS_TYPE = "_adb-tls-connect._tcp"
+    private const val MDNS_CONNECT = "_adb-tls-connect._tcp"
     private const val MDNS_WAIT_MS = 5_000L
+
+    /** What adbd announces only while Android's pairing dialog is open. */
+    private const val MDNS_PAIRING = "_adb-tls-pairing._tcp"
+    private const val PAIRING_WAIT_MS = 10_000L
 
     /** The port of the last successful search: adbd keeps it until Wireless debugging restarts. */
     @Volatile
@@ -58,7 +64,7 @@ object AdbPort {
         if (isAdb(FIXED)) return FIXED
         if (!wirelessOn()) return null
         lastFound.takeIf { it != NONE && isAdb(it) }?.let { return it }
-        viaMdns(context)?.let {
+        mdns(context, MDNS_CONNECT, MDNS_WAIT_MS) { isAdb(it.port) }?.let {
             lastFound = it
             return it
         }
@@ -68,12 +74,12 @@ object AdbPort {
     /**
      * Asks Android's service discovery for the port instead of trying them all: a few seconds
      * where the scan takes a minute or two on a slow phone. Other phones on the Wi-Fi announce
-     * theirs too, so a port only counts when adbd answers on it here.
+     * theirs too, so a port only counts when [accept] says it is this phone's.
      */
-    private fun viaMdns(context: Context): Int? {
+    private fun mdns(context: Context, type: String, waitMs: Long, accept: (NsdServiceInfo) -> Boolean): Int? {
         val nsd = context.getSystemService(NsdManager::class.java) ?: return null
         val started = System.currentTimeMillis()
-        val deadline = started + MDNS_WAIT_MS
+        val deadline = started + waitMs
         val announced = LinkedBlockingQueue<NsdServiceInfo>()
         val discovery = object : NsdManager.DiscoveryListener {
             override fun onServiceFound(info: NsdServiceInfo) { announced.add(info) }
@@ -84,7 +90,7 @@ object AdbPort {
             override fun onStopDiscoveryFailed(type: String, error: Int) {}
         }
         try {
-            nsd.discoverServices(MDNS_TYPE, NsdManager.PROTOCOL_DNS_SD, discovery)
+            nsd.discoverServices(type, NsdManager.PROTOCOL_DNS_SD, discovery)
         } catch (e: Exception) {
             Log.w(TAG, "mDNS: ${e.message}")
             return null
@@ -93,19 +99,20 @@ object AdbPort {
             while (true) {
                 val info = announced.poll(deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS) ?: break
                 // One at a time: before Android 14 a second resolve fails while one is running.
-                val resolved = LinkedBlockingQueue<Int>()
+                val resolved = LinkedBlockingQueue<NsdServiceInfo>()
+                val failed = NsdServiceInfo()
                 @Suppress("DEPRECATION")
                 nsd.resolveService(info, object : NsdManager.ResolveListener {
-                    override fun onServiceResolved(info: NsdServiceInfo) { resolved.add(info.port) }
-                    override fun onResolveFailed(info: NsdServiceInfo, error: Int) { resolved.add(NONE) }
+                    override fun onServiceResolved(info: NsdServiceInfo) { resolved.add(info) }
+                    override fun onResolveFailed(info: NsdServiceInfo, error: Int) { resolved.add(failed) }
                 })
-                val port = resolved.poll(deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS) ?: break
-                if (port != NONE && isAdb(port)) {
-                    Log.i(TAG, "mDNS: $port after ${System.currentTimeMillis() - started} ms")
-                    return port
+                val service = resolved.poll(deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS) ?: break
+                if (service !== failed && accept(service)) {
+                    Log.i(TAG, "mDNS $type: ${service.port} after ${System.currentTimeMillis() - started} ms")
+                    return service.port
                 }
             }
-            Log.i(TAG, "mDNS: nothing after ${System.currentTimeMillis() - started} ms")
+            Log.i(TAG, "mDNS $type: nothing after ${System.currentTimeMillis() - started} ms")
             return null
         } finally {
             try {
@@ -114,6 +121,19 @@ object AdbPort {
                 // never started
             }
         }
+    }
+
+    /**
+     * The port of the open pairing dialog. Going by the address and not by a try: every failed
+     * connection counts against the dialog, which ends after a few.
+     */
+    @Suppress("DEPRECATION") // host: hostAddresses only came with Android 14.
+    fun pairingPort(context: Context): Int? = mdns(context, MDNS_PAIRING, PAIRING_WAIT_MS) { isThisPhone(it.host) }
+
+    private fun isThisPhone(address: InetAddress?): Boolean = try {
+        address != null && NetworkInterface.getByInetAddress(address) != null
+    } catch (e: Exception) {
+        false
     }
 
     private fun scan(wirelessOn: () -> Boolean): Int? {
