@@ -51,12 +51,14 @@ restrict,port-forwarding,permitopen="127.0.0.1:8188",permitlisten="127.0.0.1:555
 ```
 
 The listen address must be given as `127.0.0.1`; `localhost` or no address is refused. The same
-block has `ClientAliveInterval 60` / `ClientAliveCountMax 3`, so a session lost with a network change
-frees the port within about 3 min and the phone's new session can take it. Until then the app logs
-in fine but gets "remote port forwarding failed", and retries every 10 s. A ping every 10 s would free
-the port sooner, but every ping wakes a sleeping phone: Huawei's PowerGenie flagged the app for it.
+block has `ClientAliveInterval 300` / `ClientAliveCountMax 3`, so a session lost with a network change
+frees the port within about 15 min and the phone's new session can take it. Until then the app logs
+in fine but gets "remote port forwarding failed", and retries every 10 s. Pinging more often would
+free the port sooner, but every ping wakes a sleeping phone: at 60 s a P20 Pro woke about once a
+minute, and at 10 s Huawei's PowerGenie flagged the app. A change here reaches a phone only with its
+next login; running sessions keep the old value.
 
-Those 3 min are not guaranteed: while adb on the server keeps knocking on the dead port, sshd never
+Those 15 min are not guaranteed: while adb on the server keeps knocking on the dead port, sshd never
 sends its probe, and such a session has held the port for 16 min, until TCP gave up. So the server
 script below also watches for logins refused their port ("Address already in use" from an
 `adbtunnel` session) and ends the older session holding it. Each key may only listen on its own
