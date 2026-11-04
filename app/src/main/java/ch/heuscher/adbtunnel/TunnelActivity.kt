@@ -48,11 +48,18 @@ class TunnelActivity : Activity() {
     private fun checkUsbRescue() {
         val adbDev = UsbRescue.findAttachedAdbDevice(this)
         if (adbDev != null) {
+            if (UsbRescue.isRecentlyRescued(adbDev.device)) return
             if (UsbRescue.hasUsbPermission(this, adbDev.device)) {
-                Toast.makeText(this, "Rescuing attached USB device...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(applicationContext, "Rescuing attached USB device...", Toast.LENGTH_SHORT).show()
                 UsbRescue.rescueAttachedAsync(this) { success, msg ->
-                    runOnUiThread {
-                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                    if (success) {
+                        runOnUiThread {
+                            Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show()
+                        }
+                    } else if (!msg.contains("duplicate") && !msg.contains("cooldown")) {
+                        runOnUiThread {
+                            Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             } else {

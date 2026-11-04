@@ -795,6 +795,13 @@ class TunnelService : Service() {
             UsbRescue.requestUsbPermission(this, adbDev.device)
             return
         }
+        if (UsbRescue.isRecentlyRescued(adbDev.device)) {
+            // A tap on the button should not do nothing silently.
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                android.widget.Toast.makeText(applicationContext, "USB device was just rescued; try again in 30 s", android.widget.Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
         executeUsbRescue(adbDev)
     }
 
@@ -811,11 +818,18 @@ class TunnelService : Service() {
     }
 
     private fun executeUsbRescue(adbDev: UsbRescue.AdbDevice) {
+        if (UsbRescue.isRecentlyRescued(adbDev.device)) return
         val devName = adbDev.device.productName ?: adbDev.device.deviceName
         Log.i(TAG, "Auto-rescuing attached USB device: $devName")
         UsbRescue.rescueAttachedAsync(this) { success, msg ->
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
+            if (success) {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    android.widget.Toast.makeText(applicationContext, msg, android.widget.Toast.LENGTH_LONG).show()
+                }
+            } else if (!msg.contains("duplicate") && !msg.contains("cooldown")) {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    android.widget.Toast.makeText(applicationContext, msg, android.widget.Toast.LENGTH_SHORT).show()
+                }
             }
             refreshUsbState()
         }

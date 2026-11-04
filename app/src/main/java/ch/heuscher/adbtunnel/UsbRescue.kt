@@ -13,7 +13,9 @@ import android.os.Build
 import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Handles USB Host mode ADB discovery and rescue:
@@ -31,6 +33,26 @@ object UsbRescue {
     )
 
     private val executor = Executors.newSingleThreadExecutor()
+    private val recentlyRescued = ConcurrentHashMap<String, Long>()
+    private const val RESCUE_COOLDOWN_MS = 30_000L
+    private val isRescuing = AtomicBoolean(false)
+
+    fun deviceKey(device: UsbDevice): String {
+        return "${device.vendorId}:${device.productId}"
+    }
+
+    fun isRecentlyRescued(device: UsbDevice): Boolean {
+        val key = deviceKey(device)
+        val last = recentlyRescued[key] ?: return false
+        val elapsed = System.currentTimeMillis() - last
+        if (elapsed < RESCUE_COOLDOWN_MS) return true
+        recentlyRescued.remove(key)
+        return false
+    }
+
+    private fun markRescued(device: UsbDevice) {
+        recentlyRescued[deviceKey(device)] = System.currentTimeMillis()
+    }
 
     fun findAttachedAdbDevice(context: Context): AdbDevice? {
         val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager ?: return null
@@ -88,85 +110,108 @@ object UsbRescue {
             return Pair(false, msg)
         }
 
-        val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-        if (!usbManager.hasPermission(adbDev.device)) {
-            Log.i(TAG, "UsbRescue: requesting permission for ${adbDev.device.deviceName}")
-            requestUsbPermission(context, adbDev.device)
-            return Pair(false, "Waiting for USB permission")
+        val devName = adbDev.device.productName ?: adbDev.device.deviceName
+        if (isRecentlyRescued(adbDev.device)) {
+            // Not a rescue of its own: false, so callers' "cooldown" filter keeps it silent.
+            val msg = "$devName was already rescued recently (cooldown)"
+            Log.i(TAG, "UsbRescue: $msg")
+            return Pair(false, msg)
         }
 
-        val connection = usbManager.openDevice(adbDev.device)
-        if (connection == null) {
-            val msg = "Could not open USB connection to ${adbDev.device.deviceName}"
-            Log.w(TAG, "UsbRescue: $msg")
+        if (!isRescuing.compareAndSet(false, true)) {
+            val msg = "Rescue already in progress for $devName, skipping duplicate"
+            Log.i(TAG, "UsbRescue: $msg")
             return Pair(false, msg)
         }
 
         try {
-            if (!connection.claimInterface(adbDev.iface, true)) {
-                val msg = "Could not claim ADB interface on ${adbDev.device.deviceName}"
+            val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+            if (!usbManager.hasPermission(adbDev.device)) {
+                Log.i(TAG, "UsbRescue: requesting permission for ${adbDev.device.deviceName}")
+                requestUsbPermission(context, adbDev.device)
+                return Pair(false, "Waiting for USB permission")
+            }
+
+            val connection = usbManager.openDevice(adbDev.device)
+            if (connection == null) {
+                val msg = "Could not open USB connection to ${adbDev.device.deviceName}"
                 Log.w(TAG, "UsbRescue: $msg")
                 return Pair(false, msg)
             }
 
-            Log.i(TAG, "UsbRescue: sending ADB handshake to ${adbDev.device.deviceName}...")
-            val banner = "host::adb-tunnel\u0000".toByteArray(Charsets.US_ASCII)
-            sendPacket(connection, adbDev.outEp, AdbProtocol.A_CNXN, AdbProtocol.A_VERSION, AdbProtocol.MAX_PAYLOAD, banner)
+            try {
+                if (!connection.claimInterface(adbDev.iface, true)) {
+                    val msg = "Could not claim ADB interface on ${adbDev.device.deviceName}"
+                    Log.w(TAG, "UsbRescue: $msg")
+                    return Pair(false, msg)
+                }
 
-            var packet = readPacket(connection, adbDev.inEp, 5000)
-            if (packet == null) {
-                return Pair(false, "No reply to ADB handshake")
-            }
+                Log.i(TAG, "UsbRescue: sending ADB handshake to ${adbDev.device.deviceName}...")
+                val banner = "host::adb-tunnel\u0000".toByteArray(Charsets.US_ASCII)
+                sendPacket(connection, adbDev.outEp, AdbProtocol.A_CNXN, AdbProtocol.A_VERSION, AdbProtocol.MAX_PAYLOAD, banner)
 
-            var authAttempts = 0
-            while (packet != null && packet.command == AdbProtocol.A_AUTH && authAttempts < 15) {
-                authAttempts++
-                if (packet.arg0 == AdbProtocol.AUTH_TYPE_TOKEN) {
-                    val token = packet.data
-                    if (authAttempts == 1) {
-                        Log.i(TAG, "UsbRescue: signing auth token...")
-                        val sig = AdbAuth.signToken(context, token)
-                        sendPacket(connection, adbDev.outEp, AdbProtocol.A_AUTH, AdbProtocol.AUTH_TYPE_SIGNATURE, 0, sig)
-                        packet = readPacket(connection, adbDev.inEp, 5000)
+                var packet = readPacket(connection, adbDev.inEp, 5000)
+                if (packet == null) {
+                    return Pair(false, "No reply to ADB handshake")
+                }
+
+                var authAttempts = 0
+                while (packet != null && packet.command == AdbProtocol.A_AUTH && authAttempts < 15) {
+                    authAttempts++
+                    if (packet.arg0 == AdbProtocol.AUTH_TYPE_TOKEN) {
+                        val token = packet.data
+                        if (authAttempts == 1) {
+                            Log.i(TAG, "UsbRescue: signing auth token...")
+                            val sig = AdbAuth.signToken(context, token)
+                            sendPacket(connection, adbDev.outEp, AdbProtocol.A_AUTH, AdbProtocol.AUTH_TYPE_SIGNATURE, 0, sig)
+                            packet = readPacket(connection, adbDev.inEp, 5000)
+                        } else {
+                            Log.i(TAG, "UsbRescue: sending RSA public key (waiting up to 30s for prompt)...")
+                            val pubKeyBytes = AdbAuth.getPublicKeyString(context).toByteArray(Charsets.US_ASCII)
+                            sendPacket(connection, adbDev.outEp, AdbProtocol.A_AUTH, AdbProtocol.AUTH_TYPE_RSAPUBLICKEY, 0, pubKeyBytes)
+                            packet = readPacket(connection, adbDev.inEp, 30_000)
+                        }
                     } else {
-                        Log.i(TAG, "UsbRescue: sending RSA public key (waiting up to 30s for prompt)...")
-                        val pubKeyBytes = AdbAuth.getPublicKeyString(context).toByteArray(Charsets.US_ASCII)
-                        sendPacket(connection, adbDev.outEp, AdbProtocol.A_AUTH, AdbProtocol.AUTH_TYPE_RSAPUBLICKEY, 0, pubKeyBytes)
-                        packet = readPacket(connection, adbDev.inEp, 30_000)
+                        break
                     }
-                } else {
-                    break
+                }
+
+                if (packet == null || packet.command != AdbProtocol.A_CNXN) {
+                    val msg = "Handshake failed (command=${packet?.command})"
+                    Log.w(TAG, "UsbRescue: $msg")
+                    return Pair(false, msg)
+                }
+
+                Log.i(TAG, "UsbRescue: connected! Sending tcpip:5555 command...")
+                val cmd = "tcpip:5555\u0000".toByteArray(Charsets.US_ASCII)
+                sendPacket(connection, adbDev.outEp, AdbProtocol.A_OPEN, 1, 0, cmd)
+                markRescued(adbDev.device)
+
+                try {
+                    val reply = readPacket(connection, adbDev.inEp, 2000)
+                    Log.i(TAG, "UsbRescue: OPEN response command=${reply?.command}")
+                } catch (e: Exception) {
+                    // adbd often unbinds/resets the USB interface immediately upon receiving tcpip:5555
+                    Log.i(TAG, "UsbRescue: connection closed after tcpip:5555 (expected): ${e.message}")
+                }
+
+                val successMsg = "Rescued $devName: switched to ADB TCP port 5555"
+                Log.i(TAG, "UsbRescue: $successMsg")
+                return Pair(true, successMsg)
+            } catch (e: Exception) {
+                val msg = "Rescue error: ${e.message}"
+                Log.w(TAG, "UsbRescue: $msg", e)
+                return Pair(false, msg)
+            } finally {
+                try {
+                    connection.releaseInterface(adbDev.iface)
+                    connection.close()
+                } catch (e: Exception) {
+                    // ignore
                 }
             }
-
-            if (packet == null || packet.command != AdbProtocol.A_CNXN) {
-                val msg = "Handshake failed (command=${packet?.command})"
-                Log.w(TAG, "UsbRescue: $msg")
-                return Pair(false, msg)
-            }
-
-            Log.i(TAG, "UsbRescue: connected! Sending tcpip:5555 command...")
-            val cmd = "tcpip:5555\u0000".toByteArray(Charsets.US_ASCII)
-            sendPacket(connection, adbDev.outEp, AdbProtocol.A_OPEN, 1, 0, cmd)
-
-            val reply = readPacket(connection, adbDev.inEp, 5000)
-            Log.i(TAG, "UsbRescue: OPEN response command=${reply?.command}")
-
-            val devName = adbDev.device.productName ?: adbDev.device.deviceName
-            val successMsg = "Rescued $devName: switched to ADB TCP port 5555"
-            Log.i(TAG, "UsbRescue: $successMsg")
-            return Pair(true, successMsg)
-        } catch (e: Exception) {
-            val msg = "Rescue error: ${e.message}"
-            Log.w(TAG, "UsbRescue: $msg", e)
-            return Pair(false, msg)
         } finally {
-            try {
-                connection.releaseInterface(adbDev.iface)
-                connection.close()
-            } catch (e: Exception) {
-                // ignore
-            }
+            isRescuing.set(false)
         }
     }
 
