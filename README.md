@@ -166,3 +166,11 @@ key is not forgotten after seven idle days.
 
 APKs are built only by GitHub Actions and signed with a fixed key from the repository secrets
 (`SIGNING_*`), so each build installs over the last and keeps the phone's SSH key.
+
+## Screen capture over the tunnel
+
+JSch's reverse port forward runs at roughly 0.2 MB/s, so pulling a raw `screencap -p` PNG (8–10 MB on
+a 1080p screen) takes 4 to 7 seconds per frame. Server tools therefore use `.gemini/skills/adb-remote-control`
+(`fast_capture.get_screen_image()` / `adb_remote.py shot`), which automatically starts the on-device
+`FastStream` hardware H.264 encoder on the first capture (~0.9 s cold start, <1 ms on subsequent
+frames in the same process) and only falls back to `/sdcard` PNG pull if `FastStream` cannot start.
